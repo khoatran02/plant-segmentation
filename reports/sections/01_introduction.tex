@@ -1,0 +1,20 @@
+\section{Introduction}
+Recognizing a disease label and delineating its visible symptoms are related but distinct tasks. A class label associates an image with a disease, whereas segmentation identifies the pixels occupied by annotated symptoms. Spatial delineation supports inspection of symptom distribution and can contribute to later image-based severity analysis. Field imagery complicates this task because symptoms may occupy small, disconnected areas, overlap with leaf veins, or resemble healthy tissue under changing illumination.
+
+PlantSeg was introduced to support segmentation beyond controlled acquisition settings, providing disease masks together with host-plant and disease labels~\cite{plantseg}. The present project contains two local releases, v6 and v7, alongside a dataset audit and a training implementation. Their coexistence makes release selection and annotation interpretation essential: an image total alone does not specify the supervision used by a model.
+
+SAM 3 extends promptable segmentation to concepts expressed through text or exemplars~\cite{sam3}. A disease phrase can therefore act as a condition for retrieving matching regions. This is attractive for PlantSeg because disease names already accompany each image. However, generic pretrained representations must still be evaluated against the visual ambiguity, fragmented lesions, and annotation conventions of this dataset.
+
+This work documents an adaptation of the SAM 3 image model using the existing project implementation. It addresses three questions for subsequent experiments: (1) how accurately a pretrained model delineates lesions when given a disease prompt; (2) whether adaptation with frozen encoders improves that performance; and (3) how data-quality controls affect the conclusions. These questions remain open until training and test evaluation are completed.
+
+The present contribution is a defined experimental workflow: a version-specific dataset characterization, an account of the implemented prompt and optimization strategy, and an evaluation plan that separates current validation behavior from publication metrics. The manuscript also identifies preparation steps still required to resolve known annotation problems. It does not introduce a new backbone or claim a measured improvement.
+
+\section{Related Work}
+\subsection{Dense segmentation}
+U-Net couples a contracting path for contextual representation with an expanding path for spatial localization~\cite{unet}. DeepLabv3+ combines multiscale atrous context with a decoder that refines boundaries~\cite{deeplab}. They provide useful reference families for lesion segmentation, where both local boundaries and broader plant context matter. Neither model is implemented or evaluated in the current project; they are prospective comparison methods.
+
+\subsection{Concept-conditioned segmentation}
+SAM 3 accepts concept prompts and returns masks for matching instances; its presence mechanism separates concept recognition from localization~\cite{sam3}. This project uses its image pathway and disease-name prompts. It does not use video tracking or interactive point and box prompts. Adaptation tests a domain-specific use of an existing foundation model rather than an architectural modification.
+
+\subsection{Plant disease benchmarks}
+PlantSeg supplies disease-region supervision in visually diverse plant images~\cite{plantseg}. The local v7 copy corresponds to a versioned dataset release~\cite{plantsegv7}. Counts and partitions in this paper come from the local files rather than being inferred from the original paper. This distinction matters because local v6 and v7 differ in image availability, metadata, and effective supervision.

@@ -1,0 +1,43 @@
+\documentclass[10pt,a4paper,twocolumn]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{mathptmx}
+\usepackage[margin=19mm,columnsep=6mm]{geometry}
+\usepackage{amsmath,amssymb,graphicx,booktabs,tabularx}
+\usepackage{microtype,xcolor,tikz}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{balance}
+\usetikzlibrary{arrows.meta,positioning}
+\usepackage[font=small,labelfont=bf]{caption}
+\usepackage[hidelinks]{hyperref}
+\usepackage{url}
+\urlstyle{same}
+\setlength{\parindent}{1em}
+\setlength{\parskip}{0pt}
+\setlength{\textfloatsep}{10pt}
+\setlength{\floatsep}{8pt}
+\newcommand{\pending}{\textit{Pending}}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\title{Text-Prompted Plant Disease Lesion Segmentation\\with SAM 3 on PlantSeg}
+% Author and affiliation are intentionally blank until supplied.
+\author{}
+\date{}
+\hypersetup{pdftitle={Text-Prompted Plant Disease Lesion Segmentation with SAM 3 on PlantSeg}}
+\raggedbottom
+\begin{document}
+\maketitle
+\begin{abstract}
+Plant disease lesion segmentation requires the localization of irregular symptoms in images with variable backgrounds, scales, and illumination. This paper describes a repository-grounded workflow for adapting Segment Anything Model 3 (SAM 3) to disease-conditioned lesion segmentation on PlantSeg. Disease names provide text prompts, while positive and negative queries supervise lesion localization and concept presence. The implementation combines pretrained visual and language representations with trainable fusion, localization, and segmentation components. The local PlantSeg v7 release contains 7,774 image--mask pairs across 115 disease categories and 34 host plants. A structural recheck confirms 21,580 orphan polygon annotations in the raw release; the existing annotation builder removes these records and produces 5,367 training, 846 validation, and 1,560 test images with polygon supervision. An earlier local audit additionally identifies polygon--mask disagreements and duplicate leakage, motivating a separate quality-controlled evaluation protocol. We document the implemented preprocessing, optimization settings, loss components, and validation metrics, and define the additional evaluation needed for final reporting. Model performance, learning curves, and prediction examples remain pending; this draft makes no empirical claim about segmentation accuracy or improvement over baselines.
+\end{abstract}
+\noindent\textbf{Keywords:} plant disease; lesion segmentation; SAM 3; text prompts; PlantSeg; transfer learning.
+
+\input{sections/01_introduction}
+\input{sections/02_dataset}
+\input{sections/03_method}
+\input{sections/04_protocol}
+\input{sections/05_results}
+\input{sections/06_discussion}
+\balance
+\bibliographystyle{unsrtnat}
+\bibliography{references}
+\end{document}

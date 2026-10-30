@@ -1,0 +1,59 @@
+\section{Results}
+\label{sec:results}
+\subsection{Verified preparation findings}
+The structural inspection establishes dataset availability and annotation-builder behavior. It confirms the release totals in Table~\ref{tab:versions}, orphan-annotation removal in Table~\ref{tab:effective}, and the distinction between raw image--mask pairs and effective polygon supervision. These are data-preparation findings. They do not measure segmentation quality, convergence, generalization, or hardware feasibility.
+
+The builder also reports 67 training and 40 test v7 annotations whose category differs from the image metadata. It rewrites those categories to the metadata class while preserving polygon geometry. This check reinforces why successful COCO construction alone is insufficient to demonstrate annotation correctness.
+
+\subsection{Quantitative performance}
+Model results will be inserted after training and evaluation. Table~\ref{tab:results} reserves the primary comparison. Every pending entry means that no verified measurement is available; it does not represent zero performance. All final values must share the same reference masks, split manifest, and prompt assumptions.
+
+\begin{table}[!ht]
+\centering\small
+\caption{Primary performance table to complete using original-frame PNG masks. IoU and Dice are image means; Macro is disease-macro IoU. Additional pixel and negative-query statistics should accompany the final table.}
+\label{tab:results}
+\setlength{\tabcolsep}{3pt}
+\begin{tabularx}{\columnwidth}{Xccc}\toprule
+Configuration & IoU & Dice & Macro\\\midrule
+SAM 3 pretrained & \pending & \pending & \pending\\
+Frozen-encoder adaptation & \pending & \pending & \pending\\
+Full adaptation (optional) & \pending & \pending & \pending\\\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Learning behavior and efficiency}
+Training and validation curves will be added from run logs with explicit epoch or update axes. The selected checkpoint, stopping epoch, skipped nonfinite batches, and validation criterion must accompany them. A change in validation IoU should not be interpreted as a native-resolution test improvement without the corresponding test evaluation.
+
+\begin{table}[!ht]
+\centering\small
+\caption{Runtime and training record to complete for the selected adapted model.}
+\label{tab:runtime}
+\begin{tabular}{lr}\toprule
+Record & Measurement\\\midrule
+GPU / software environment & \pending\\
+Final data-manifest identifier & \pending\\
+Training scope / actual precision & \pending\\
+Trainable parameter count & \pending\\
+Selected epoch / optimizer updates & \pending\\
+Training duration & \pending\\
+Peak GPU memory & \pending\\
+Inference latency per image and prompt & \pending\\\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Qualitative analysis}
+Prediction panels will compare input images, PNG references, pretrained outputs, and adapted outputs for identical disease prompts. Include successful cases and errors involving tiny lesions, extensive symptoms, clutter, and ambiguous tissue. Negative-query examples should expose spurious responses. Annotated dataset examples in Fig.~\ref{fig:samples} cannot replace these prediction panels.
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox[c][27mm][c]{0.91\columnwidth}{\centering\small
+Prediction panels pending\\[3pt]
+Input image $\mid$ PNG reference\\
+Pretrained mask $\mid$ Adapted mask\\[3pt]
+Add disease prompt, confidence rule, and per-image IoU.}}
+\caption{Reserved location for actual model predictions. No synthetic prediction or unmeasured score is displayed.}
+\label{fig:predictions}
+\end{figure}
+
+\subsection{Ablation and error analysis}
+After the primary run, report the effect of negative-query sampling and adaptation scope using a fixed split and validation procedure. Compare the original and quality-controlled protocols with their own denominators. Discuss rare-class errors and the sensitivity of small lesions to mask resolution. Statistical or causal claims about any design choice remain deferred until the corresponding controlled comparisons are available.

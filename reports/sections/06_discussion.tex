@@ -1,0 +1,13 @@
+\section{Discussion and Limitations}
+The current workflow links disease vocabulary to localized regions and reuses pretrained representations while restricting default encoder updates. This provides a concrete adaptation strategy to evaluate, but its benefit over unadapted inference is still unknown. The availability of loss functions, memory-oriented code paths, and checkpoint handling does not demonstrate successful optimization.
+
+Annotation choice is a central limitation. The training script learns from polygons, whereas the earlier audit recommends PNG masks as a more reliable semantic reference for flagged samples. Relabeling a polygon from metadata leaves incorrect geometry unchanged. Excluding faulty records or regenerating pseudo-instances can reduce this inconsistency, but either action changes the supervision and needs an explicit manifest and ablation.
+
+Duplicate leakage and limited rare-class support constrain generalization claims. A high aggregate score could reflect repeated photographs or dominant categories. Image-level and disease-level metrics, grouped uncertainty estimates, and a transparent duplicate policy address different parts of this problem. They cannot establish field deployment performance outside the dataset's acquisition distribution.
+
+Disease-conditioned prompting also limits the intended conclusion. Knowing the correct disease name supplies information unavailable in an unrestricted diagnostic setting. Negative prompts test whether the model suppresses absent concepts under the chosen annotation policy, but the project contains no independently verified healthy-image cohort or exhaustive multi-disease labels for this study. Clinical or agronomic disease absence cannot be inferred solely from a missing class annotation.
+
+Finally, lesion area as a fraction of the whole photograph is not automatically a disease-severity estimate. A severity measure based on affected plant tissue needs an appropriate plant-organ denominator and a validated annotation interpretation. The present work focuses on segmentation against supplied labels.
+
+\section{Conclusion}
+This paper specifies an implemented SAM 3 adaptation workflow for disease-prompted PlantSeg segmentation and a protocol for evaluating it. Current evidence verifies local release structure, prompt and optimization settings, and the annotation-builder output. It also identifies unresolved geometry, orientation, and duplicate issues that affect the validity of later experiments. The next empirical stage is to freeze the data policy, train the selected configurations, and populate the quantitative and qualitative results. No model-accuracy conclusion is drawn in this draft.

@@ -1,0 +1,419 @@
+                 Text-Prompted Plant Disease Lesion Segmentation
+                            with SAM 3 on PlantSeg
+
+
+Abstract                                                            therefore act as a condition for retrieving matching regions.
+                                                                    This is attractive for PlantSeg because disease names al-
+Plant disease lesion segmentation requires the localiza-            ready accompany each image. However, generic pretrained
+tion of irregular symptoms in images with variable back-            representations must still be evaluated against the visual am-
+grounds, scales, and illumination. This paper describes a           biguity, fragmented lesions, and annotation conventions of
+repository-grounded workflow for adapting Segment Any-              this dataset.
+thing Model 3 (SAM 3) to disease-conditioned lesion seg-               This work documents an adaptation of the SAM 3 image
+mentation on PlantSeg. Disease names provide text prompts,          model using the existing project implementation. It ad-
+while positive and negative queries supervise lesion local-         dresses three questions for subsequent experiments: (1) how
+ization and concept presence. The implementation com-               accurately a pretrained model delineates lesions when given
+bines pretrained visual and language representations with           a disease prompt; (2) whether adaptation with frozen en-
+trainable fusion, localization, and segmentation components.        coders improves that performance; and (3) how data-quality
+The local PlantSeg v7 release contains 7,774 image–mask             controls affect the conclusions. These questions remain open
+pairs across 115 disease categories and 34 host plants. A           until training and test evaluation are completed.
+structural recheck confirms 21,580 orphan polygon anno-                The present contribution is a defined experimental work-
+tations in the raw release; the existing annotation builder         flow: a version-specific dataset characterization, an account
+removes these records and produces 5,367 training, 846 val-         of the implemented prompt and optimization strategy, and
+idation, and 1,560 test images with polygon supervision.            an evaluation plan that separates current validation behavior
+An earlier local audit additionally identifies polygon–mask         from publication metrics. The manuscript also identifies
+disagreements and duplicate leakage, motivating a separate          preparation steps still required to resolve known annotation
+quality-controlled evaluation protocol. We document the             problems. It does not introduce a new backbone or claim a
+implemented preprocessing, optimization settings, loss com-         measured improvement.
+ponents, and validation metrics, and define the additional
+evaluation needed for final reporting. Model performance,
+learning curves, and prediction examples remain pending;            2     Related Work
+this draft makes no empirical claim about segmentation accu-
+racy or improvement over baselines. Keywords: plant dis-            2.1    Dense segmentation
+ease; lesion segmentation; SAM 3; text prompts; PlantSeg;
+                                                                    U-Net couples a contracting path for contextual represen-
+transfer learning.
+                                                                    tation with an expanding path for spatial localization [3].
+                                                                    DeepLabv3+ combines multiscale atrous context with a de-
+1    Introduction                                                   coder that refines boundaries [4]. They provide useful ref-
+                                                                    erence families for lesion segmentation, where both local
+Recognizing a disease label and delineating its visible symp-       boundaries and broader plant context matter. Neither model
+toms are related but distinct tasks. A class label associates       is implemented or evaluated in the current project; they are
+an image with a disease, whereas segmentation identifies the        prospective comparison methods.
+pixels occupied by annotated symptoms. Spatial delineation
+supports inspection of symptom distribution and can con-            2.2    Concept-conditioned segmentation
+tribute to later image-based severity analysis. Field imagery
+complicates this task because symptoms may occupy small,            SAM 3 accepts concept prompts and returns masks for
+disconnected areas, overlap with leaf veins, or resemble            matching instances; its presence mechanism separates con-
+healthy tissue under changing illumination.                         cept recognition from localization [2]. This project uses its
+   PlantSeg was introduced to support segmentation beyond           image pathway and disease-name prompts. It does not use
+controlled acquisition settings, providing disease masks to-        video tracking or interactive point and box prompts. Adap-
+gether with host-plant and disease labels [1]. The present          tation tests a domain-specific use of an existing foundation
+project contains two local releases, v6 and v7, alongside a         model rather than an architectural modification.
+dataset audit and a training implementation. Their coexis-
+tence makes release selection and annotation interpretation         2.3    Plant disease benchmarks
+essential: an image total alone does not specify the supervi-
+sion used by a model.                                               PlantSeg supplies disease-region supervision in visually di-
+   SAM 3 extends promptable segmentation to concepts ex-            verse plant images [1]. The local v7 copy corresponds to a
+pressed through text or exemplars [2]. A disease phrase can         versioned dataset release [5]. Counts and partitions in this
+
+
+                                                                1
+Table 1: Local dataset releases. Disease counts refer to underlying       Table 2: Rechecked v7 annotation counts. “Effective images” are
+labels; v6 metadata exposes only 114 IDs because of a soybean-rust        produced by the current builder before stochastic training trans-
+labeling error. Coverage statistics are calculated from metadata.         forms.
+
+            Property                      v6       v7                                                    Train      Val.     Test
+            Image–mask pairs          11,458    7,774                             Raw images             5,367      846     1,561
+            Training images            7,916    5,367                             Raw polygons          52,898    8,927    15,569
+            Validation images          1,247      846                             Orphan polygons       14,647    2,467     4,466
+            Test images                2,295    1,561                             Retained polygons     38,251    6,460    11,103
+            Host plants                   34       34                             Effective images       5,367      846     1,560
+            Disease categories           115      115
+            Mean coverage (%)           21.4     21.4                     3.3    Class and foreground imbalance
+            Median coverage (%)         13.7     13.9
+                                                                          The prior audit reports a long-tailed distribution: v7 class
+paper come from the local files rather than being inferred                sizes range from 3 to 323 images, and 26 disease categories
+from the original paper. This distinction matters because                 have fewer than 20 training images. Coffee black rot has
+local v6 and v7 differ in image availability, metadata, and               no test image, while peach rust has no validation image. A
+effective supervision.                                                    class macro-average must therefore state the eligible class
+                                                                          set and cannot silently assume support for every class in
+                                                                          every partition.
+3     Dataset and Annotation Audit                                           Mean foreground coverage is approximately 21.4%, with
+                                                                          median coverage 13.9%. The earlier pixel audit estimates
+3.1    Evidence and scope                                                 that diseased pixels occupy 19.4% of all v7 pixels when
+                                                                          weighted by image size. Image-averaged coverage and pixel-
+The dataset description combines two evidence sources. A                  weighted coverage are different statistics. Small regions can
+local audit dated 7 October 2026 reports full image and                   consequently contribute little to global pixel scores even
+mask decoding, polygon comparisons, and duplicate screen-                 when clinically or visually salient. Figure 1 illustrates the
+ing [6]. For this manuscript, metadata, file presence, anno-              variety of annotation extent, including whole-region labels
+tation references, and the actual annotation-builder output               and individual spots.
+were rechecked on 30 October 2026 [7]. This structural
+recheck did not repeat the pixel-level audit, duplicate search,
+or model inference. Historical audit findings are identified              3.4    Raw and effective polygon supervision
+accordingly.                                                              The structural recheck confirms that v7 retains 77,394 raw
+                                                                          annotation records, of which 21,580 refer to image IDs ab-
+3.2 Release selection and label representation                            sent from their split. The surviving records total 55,814. The
+                                                                          project builder filters these orphan records, rejects polygons
+The current script defaults to v7. Its 7,774 images are par-              with invalid coordinate counts and boxes smaller than one
+titioned into 5,367 training, 846 validation, and 1,561 test              pixel, normalizes numeric fields, and drops images with no
+samples (Table 1). The previous audit reports that v7 retains             remaining annotation.
+a byte-identical subset of 7,774 v6 images and masks, with                   The single excluded test image has a PNG mask but no
+no split changes. Thus v6 and v7 must not be treated as                   polygon annotation. Therefore the script’s effective polygon
+independent datasets or used as separate training and test                test set has 1,560 images, whereas a PNG-mask evaluation
+domains.                                                                  can retain all 1,561. Both the reference type and evaluated
+    Each image has a same-stem PNG semantic mask and an                   sample count must accompany any final score.
+associated metadata row. The mask value 0 denotes back-
+ground, while nonzero values represent disease IDs offset
+by one. Each image has one labeled disease, potentially oc-               3.5    Quality issues beyond structural filtering
+cupying multiple disconnected regions. The semantic mask                  The earlier audit reports 180 v7 images whose polygons
+therefore does not, by itself, define lesion instance identi-             belong to another image, including 163 training samples.
+ties. COCO polygon annotations supply the instance-style                  Structural filtering does not repair these shapes. The same
+supervision consumed by the current training script.                      audit identifies 107 validation and 183 test images with an
+    Metadata provides disease names, plant names, class in-               exact or near duplicate in training. These are screened du-
+dices, split membership, and mask coverage. The v7 CSV                    plicate candidates based on image hashing and local review;
+requires UTF-8 BOM handling. The raw COCO files have                      the full duplicate analysis was not rerun for this paper.
+empty category lists, so class names cannot be recovered                     Additional reported issues include conflicting disease la-
+from those lists alone. The training builder reconstructs cat-            bels and nine images with EXIF orientation flags. The
+egories from metadata. Its use of image-level metadata also               inspected image loader converts opened images to RGB
+overrides conflicting annotation category IDs; this is a la-              without an explicit EXIF transpose at that location. Orien-
+beling policy, not an independent confirmation of biological              tation alignment must therefore be checked before a final
+correctness.                                                              experiment. The present training path also does not remove
+                                                                          flagged duplicates or regenerate instances from PNG masks.
+
+
+
+                                                                      2
+Figure 1: PlantSeg examples from the existing local audit, with PNG ground-truth masks overlaid in blue. They illustrate fragmented
+spots, elongated symptoms, and extensive diseased regions. These are annotation examples, not model predictions. Source: local dataset
+audit [6].
+
+
+These remain required preparation choices for the quality-                             Image + metadata disease name
+controlled study described in Section 5.                                                Positive or negative text query
+
+                                                                                   SAM 3 visual features + text features
+4     Method                                                                   Frozen trunk and language encoder by default
+
+4.1    Task formulation                                                            Trainable visual neck, fusion, decoder,
+Given an RGB image I and a disease phrase t, the model                           localization and segmentation components
+produces a set of masks, localization boxes, and confidence
+scores:                                                                         Presence score + query confidence + masks
+                fθ (I,t) = {(M j , b j , s j )}Qj=1 .    (1)
+For semantic lesion evaluation, accepted instance masks are                              Threshold and mask union
+combined into a foreground union. A positive prompt names                          Positive IoU / query response statistics
+the disease assigned to the image. A negative prompt names
+another annotated disease category and is supervised to re-           Figure 2: Implemented image-model workflow. The diagram
+turn no lesion instance. This negative supervision assumes            depicts the default adaptation scope; full fine-tuning is an optional
+that the image-level annotation is exhaustive for the queried         script setting.
+concept; unannotated co-occurring symptoms may violate
+that assumption.                                                         The default heads scope freezes the visual transformer
+   Supplying the correct disease name defines disease-                trunk and the language backbone. Other components, in-
+conditioned segmentation. It does not establish automatic             cluding the visual neck, remain trainable. Consequently the
+disease diagnosis. Querying all 115 names and selecting a             scope name should not be interpreted as training only a final
+disease is a separate evaluation task that the current valida-        prediction layer. The alternative full scope enables opti-
+tion routine does not implement.                                      mization of all parameters. No adaptation-scope comparison
+                                                                      has yet been measured.
+4.2    Backbone and adaptation scope                                     With frozen language features, the script encodes the fixed
+                                                                      disease vocabulary once, caches the resulting tensors, and
+The implementation builds the SAM 3 image model with                  removes the language module from the active model. This
+segmentation enabled and pretrained weights supplied lo-              makes training dependent on that fixed prompt vocabulary.
+cally or retrieved through the model builder. Its visual trunk        Experiments using alternative prompt wording require re-
+uses a vision transformer; language features represent the            computing compatible features. Adaptation checkpoints
+supplied phrases. Fusion and decoding produce concept-                save trainable parameters rather than a complete standalone
+conditioned localization and segmentation outputs. Figure 2           model, so reproducing inference also requires the matching
+summarizes this path.
+
+
+                                                                  3
+pretrained base and adaptation settings.                             Table 3: Implemented default configuration. Actual run settings
+                                                                     and hardware remain to be recorded.
+
+4.3    Prompt construction and sampling                                  Setting                                                 Value
+Prompt text is the lowercased metadata disease name; the                 Adaptation scope                        Frozen trunk and text
+plant field is retained for negative sampling. During training           Epochs                                                      20
+the positive category is retained with probability 0.7. The              Images per training batch                                    1
+default uses one prompt per image, so a selected example                 Gradient accumulation                                        8
+normally supplies either its positive disease or a negative              Training prompts per image                                   1
+disease, rather than both simultaneously.                                Positive-prompt probability                                0.7
+   For remaining prompt slots, the sampler first requests                Validation negative prompts                                  2
+up to ⌈K/2⌉ absent diseases from the same plant and fills                Transformer/head learning rate                      8 × 10−5
+                                                                         Visual-component learning rate                    2.5 × 10−5
+the remainder from other plants, where K is the number of
+                                                                         Language learning rate (full scope)                 5 × 10−6
+negative slots. With the one-prompt default, the negative is
+                                                                         Weight decay / gradient clip norm                    0.1 / 0.1
+from the same plant whenever such a category is available.               Requested warm-up steps                                   100
+This creates a challenging contrast between diseases that                Cooldown fraction                                          0.1
+share host appearance. Increasing the prompt count changes               Score threshold                                            0.5
+both query composition and memory demand.                                Random seed / data workers                               0/4
+   Validation always includes the positive disease and, by
+default, two negative categories. Negative selection uses an         branches, auxiliary outputs, and normalization. Instance-
+image-index-seeded random generator, providing repeatable            mask focal settings use α = 0.25, γ = 2, while the semantic
+choices within the same dataset ordering. The number of              focal settings use α = 0.6, γ = 2. The semantic criterion
+returned negatives can depend on available categories. A             disables its separate presence-loss term. Instance-mask aux-
+run must record its resulting prompt set and negative-query          iliary losses are disabled. This is a composite supervised
+count for interpretation of false-positive rates.                    adaptation objective, not a single binary-mask loss.
+
+4.4    Image transforms                                              4.6     Optimization and memory management
+The model path uses a 1,008-pixel reference resolution.              Table 3 gives the current command-line defaults, not a com-
+Training decodes segmentations, applies a random horizon-            pleted experiment’s configuration. AdamW applies weight
+tal flip and square scale jitter generated from a 480-pixel          decay to multidimensional parameters and excludes biases
+minimum, pads to 1,008 × 1,008, converts to tensors, and             and one-dimensional parameters. An inverse-square-root
+normalizes each channel with mean and standard deviation             schedule includes warm-up and cooldown. The script eval-
+0.5. Filters remove zero-area targets and restrict training          uates each epoch, selects the best checkpoint by validation
+examples to at most 200 output objects per query. Validation         IoU, and writes a latest checkpoint.
+uses a deterministic square resize to the reference resolution          The nominal effective batch is eight images per optimizer
+and the same normalization.                                          update. The implemented loop updates only on complete
+   Resizing is shared between image and annotation geom-             accumulation groups; it does not flush a partial group at
+etry, but square resizing changes aspect ratio. Padding and          epoch end. With the unfiltered 5,367-image training set
+low-resolution mask output also affect how an IoU score              and batch size one, this gives 670 scheduled updates per
+should be interpreted. Final PNG evaluation should explic-           epoch, subject to runtime filtering and skipped nonfinite
+itly map outputs to the original, orientation-corrected coor-        losses. Warm-up is capped at one quarter of scheduled steps,
+dinate frame. That evaluation is an addition to the current          and cooldown is at least one step.
+validation helper.                                                      Mixed precision is selected from GPU capability, with
+                                                                     optional reduced-precision storage for frozen modules. The
+4.5    Matching and supervision                                      code includes a differentiable fallback for a fused visual
+                                                                     MLP and convolution-layout handling for older GPUs.
+The criterion uses binary Hungarian matching with class,
+                                                                     These are implementation choices whose numerical stability
+box-distance, and generalized-IoU costs weighted 2, 5, and
+                                                                     and memory use require measurement on the eventual train-
+2. An additional one-to-many matcher uses α = 0.3, thresh-
+                                                                     ing machine; they are not evidence that a complete run fits a
+old 0.4, and top-k = 4, with an overall weight of 2. The
+                                                                     particular device.
+loss wrapper combines localization, classification, presence,
+instance-mask, and semantic-region supervision.
+   At the component level, configured weights are                    5      Experimental Protocol
+              Lloc = 5Lbox + 2LGIoU ,                     (2)
+                                                                     5.1     Current validation metrics
+          Lconcept = 20Lcls + 20Lpres ,                   (3)
+             Linst = 200Lmask + 10LDice ,                 (4)        For query q and instance j, the existing helper multiplies the
+                                                                     sigmoid query logit by the sigmoid concept-presence logit:
+             Lsem = 20Lsem-focal + 30Lsem-Dice .          (5)
+These expressions summarize configured component                                            sq j = σ (zq j )σ (pq ).                  (6)
+weights; the upstream wrapper also handles matching
+
+
+                                                                 4
+It accepts instances with sq j > 0.5, thresholds mask logits at        training images belonging to validation or test duplicate clus-
+zero, and takes their union:                                           ters. If a cluster spans validation and test, it must also be
+                         [                                             assigned to one evaluation partition or explicitly excluded. A
+               bq =
+               G                    {x : ℓq j (x) > 0}.      (7)       saved manifest must define these choices, final class support,
+                      j:sq j >0.5
+                                                                       and exclusions.
+Ground-truth instance masks are area-resampled to the                     The currently available duplicate screening can initialize
+output-mask size and binarized at 0.5 before union. The                this process, but its threshold-based clusters need review
+resulting IoU is averaged across positive queries. It is               before a final manifest is frozen. No corrected manifest has
+a polygon-derived, output-resolution score, not native-                been generated by this report. Dataset tables describe the
+resolution PNG-mask IoU.                                               available files and current builder, not an already cleaned
+   The logged val_recall is the fraction of positive queries           benchmark.
+for which at least one instance survives the score thresh-                Hyperparameters, stopping criteria, and thresholds should
+old. It does not require spatial overlap and is therefore a            be selected on validation only. The test partition should be
+positive-query response rate rather than lesion detection re-          evaluated after those decisions are fixed. Include all 1,561
+call. Similarly, val_false_positive is the fraction of                 v7 test PNG pairs for semantic evaluation unless the chosen
+sampled negative queries with any accepted instance. It                quality policy explicitly removes samples. Document every
+is a query-level false-alarm rate, not a pixel false-positive          exclusion, including any difference from the builder’s 1,560
+rate. These distinctions must remain explicit when importing           polygon-supported images.
+training logs into the results section.
+                                                                       5.4    Comparisons and ablations
+5.2    Final segmentation metrics to add                               The primary comparison is pretrained SAM 3 without adap-
+The primary final evaluation should use the union of pre-              tation versus the default frozen-encoder adaptation, using
+dicted disease regions against the binary PNG reference                identical disease prompts, preprocessing, and scoring. A
+G = {x : Y (x) > 0} in the original aligned image frame.               full-adaptation configuration can test whether updating rep-
+With pixel counts TP, FP, and FN, define                               resentations adds value when resources permit. Further
+                                                                       controlled ablations can vary positive-only versus negative-
+                              TP                                       query training, same-plant versus other-plant negatives, and
+                   IoU =              ,                      (8)
+                         TP + FP + FN                                  original versus quality-controlled supervision.
+                              2TP                                         U-Net and DeepLabv3+ are optional future semantic base-
+                  Dice =                .                    (9)
+                         2TP + FP + FN                                 lines. Their output task and use of disease labels must be
+Pixel precision and recall are TP/(TP + FP) and TP/(TP +               specified to make a comparison interpretable. A generic
+FN). For a nonempty reference and empty prediction, IoU,               lesion model that receives no disease name has a different
+Dice, and recall are zero; prediction precision is undefined           input contract from a model given the correct disease phrase.
+and should be reported as such. Empty references and ab-               None of these prospective baselines or ablations is claimed
+sent disease classes require an explicit policy rather than an         as completed.
+implicit smoothing convention.                                            Use multiple training seeds if feasible and report their
+  Report image-mean IoU and Dice, pooled foreground IoU,               mean and variation. Resampling uncertainty should respect
+and a disease-macro score. For class c with nc eligible test           duplicate clusters rather than treating near-identical images
+images,                                                                as independent observations. Also analyze small-coverage
+                                                                       images and rare diseases separately. Prompted localization
+                              1         1                              is not a substitute for a disease-classification experiment,
+           mIoUdisease =                           IoUi ,   (10)
+                             |C∗ | c∈C∗ nc i:y∑
+                                    ∑
+                                              i =c
+                                                                       so conclusions should remain conditional on the supplied
+                                                                       prompt.
+where C∗ contains classes with test support. This is an aver-
+age of image scores within disease, then across diseases. It
+differs from averaging classwise pooled confusion matrices             5.5    Reproducibility records
+and from averaging disease and background semantic IoUs.               A final run should preserve the pretrained checkpoint identi-
+   Dice, precision, disease-macro aggregation, uncertainty             fier and hash, source revision, resolved arguments, dataset
+estimates, and native-resolution PNG evaluation are not                manifest, prompt vocabulary, seed, software versions, GPU
+currently produced by the helper. Instance AP may be added             model, optimizer updates, and checkpoint-selection rule.
+only after polygon quality and instance definitions have been          Record peak allocated GPU memory and latency with input
+resolved. A mask connected component is an operational                 size, precision, batch size, and synchronization policy. All
+pseudo-instance and should not be represented as an expert-            these runtime measurements remain pending.
+verified lesion identity.                                                 The report evidence snapshot records source and dataset
+                                                                       hashes and the vendored SAM 3 revision. The existing script
+5.3    Data preparation and split policy                               produces JSONL training logs and adaptation checkpoints.
+                                                                       Resuming additionally requires a compatible base model
+Two protocols should be distinguished. The existing split              and optimizer state. The main entry point currently runs
+protocol preserves the local partition and reports its known           training and validation; a standalone test evaluator must be
+duplicate risk. The quality-controlled protocol verifies orien-        supplied for the final protocol above.
+tation, resolves flagged polygon mismatches, and removes
+
+
+                                                                   5
+6      Results
+                                                                                            Prediction panels pending
+6.1     Verified preparation findings                                                     Input image | PNG reference
+The structural inspection establishes dataset availability and                           Pretrained mask | Adapted mask
+annotation-builder behavior. It confirms the release totals                   Add disease prompt, confidence rule, and per-image IoU.
+in Table 1, orphan-annotation removal in Table 2, and the
+distinction between raw image–mask pairs and effective
+polygon supervision. These are data-preparation findings.               Figure 3: Reserved location for actual model predictions. No
+They do not measure segmentation quality, convergence,                  synthetic prediction or unmeasured score is displayed.
+generalization, or hardware feasibility.
+   The builder also reports 67 training and 40 test v7 anno-            6.4      Qualitative analysis
+tations whose category differs from the image metadata. It
+                                                                        Prediction panels will compare input images, PNG refer-
+rewrites those categories to the metadata class while preserv-
+                                                                        ences, pretrained outputs, and adapted outputs for identical
+ing polygon geometry. This check reinforces why successful
+                                                                        disease prompts. Include successful cases and errors involv-
+COCO construction alone is insufficient to demonstrate an-
+                                                                        ing tiny lesions, extensive symptoms, clutter, and ambiguous
+notation correctness.
+                                                                        tissue. Negative-query examples should expose spurious
+                                                                        responses. Annotated dataset examples in Fig. 1 cannot
+6.2     Quantitative performance                                        replace these prediction panels.
+Model results will be inserted after training and evaluation.
+Table 4 reserves the primary comparison. Every pending                  6.5      Ablation and error analysis
+entry means that no verified measurement is available; it               After the primary run, report the effect of negative-query
+does not represent zero performance. All final values must              sampling and adaptation scope using a fixed split and valida-
+share the same reference masks, split manifest, and prompt              tion procedure. Compare the original and quality-controlled
+assumptions.                                                            protocols with their own denominators. Discuss rare-class
+                                                                        errors and the sensitivity of small lesions to mask resolution.
+Table 4: Primary performance table to complete using original-
+frame PNG masks. IoU and Dice are image means; Macro is                 Statistical or causal claims about any design choice remain
+disease-macro IoU. Additional pixel and negative-query statistics       deferred until the corresponding controlled comparisons are
+should accompany the final table.                                       available.
+
+Configuration                          IoU      Dice    Macro
+                                                                        7      Discussion and Limitations
+SAM 3 pretrained                     Pending Pending Pending
+Frozen-encoder adaptation            Pending Pending Pending            The current workflow links disease vocabulary to localized
+Full adaptation (optional)           Pending Pending Pending            regions and reuses pretrained representations while restrict-
+                                                                        ing default encoder updates. This provides a concrete adap-
+                                                                        tation strategy to evaluate, but its benefit over unadapted
+                                                                        inference is still unknown. The availability of loss functions,
+6.3     Learning behavior and efficiency
+                                                                        memory-oriented code paths, and checkpoint handling does
+Training and validation curves will be added from run logs              not demonstrate successful optimization.
+with explicit epoch or update axes. The selected checkpoint,               Annotation choice is a central limitation. The training
+stopping epoch, skipped nonfinite batches, and validation               script learns from polygons, whereas the earlier audit recom-
+criterion must accompany them. A change in validation                   mends PNG masks as a more reliable semantic reference for
+IoU should not be interpreted as a native-resolution test               flagged samples. Relabeling a polygon from metadata leaves
+improvement without the corresponding test evaluation.                  incorrect geometry unchanged. Excluding faulty records or
+                                                                        regenerating pseudo-instances can reduce this inconsistency,
+Table 5: Runtime and training record to complete for the selected       but either action changes the supervision and needs an ex-
+adapted model.                                                          plicit manifest and ablation.
+                                                                           Duplicate leakage and limited rare-class support constrain
+      Record                                   Measurement              generalization claims. A high aggregate score could reflect
+      GPU / software environment                    Pending             repeated photographs or dominant categories. Image-level
+      Final data-manifest identifier                Pending             and disease-level metrics, grouped uncertainty estimates,
+      Training scope / actual precision             Pending             and a transparent duplicate policy address different parts
+      Trainable parameter count                     Pending             of this problem. They cannot establish field deployment
+      Selected epoch / optimizer updates            Pending             performance outside the dataset’s acquisition distribution.
+      Training duration                             Pending                Disease-conditioned prompting also limits the intended
+      Peak GPU memory                               Pending             conclusion. Knowing the correct disease name supplies
+      Inference latency per image and prompt        Pending
+                                                                        information unavailable in an unrestricted diagnostic setting.
+                                                                        Negative prompts test whether the model suppresses absent
+                                                                        concepts under the chosen annotation policy, but the project
+                                                                        contains no independently verified healthy-image cohort or
+
+
+                                                                    6
+exhaustive multi-disease labels for this study. Clinical or         [2] Nicolas Carion, Laura Gustafson, Yuan-Ting Hu, Shoub-
+agronomic disease absence cannot be inferred solely from a              hik Debnath, Ronghang Hu, Didac Suris, et al. SAM
+missing class annotation.                                               3: Segment anything with concepts. arXiv preprint
+   Finally, lesion area as a fraction of the whole photograph           arXiv:2511.16719, 2025. URL https://arxiv.org/abs/
+is not automatically a disease-severity estimate. A severity            2511.16719.
+measure based on affected plant tissue needs an appropriate
+plant-organ denominator and a validated annotation interpre-        [3] Olaf Ronneberger, Philipp Fischer, and Thomas Brox.
+tation. The present work focuses on segmentation against                U-Net: Convolutional networks for biomedical image
+supplied labels.                                                        segmentation. arXiv preprint arXiv:1505.04597, 2015.
+                                                                        URL https://arxiv.org/abs/1505.04597.
+                                                                    [4] Liang-Chieh Chen, Yukun Zhu, George Papandreou,
+8    Conclusion                                                         Florian Schroff, and Hartwig Adam. Encoder-decoder
+This paper specifies an implemented SAM 3 adaptation                    with atrous separable convolution for semantic image
+workflow for disease-prompted PlantSeg segmentation and                 segmentation. arXiv preprint arXiv:1802.02611, 2018.
+a protocol for evaluating it. Current evidence verifies lo-             URL https://arxiv.org/abs/1802.02611.
+cal release structure, prompt and optimization settings, and        [5] Tianqi Wei, Zhi Chen, Xin Yu, Scott Chapman, Paul
+the annotation-builder output. It also identifies unresolved            Melloy, and Zi Huang. A large-scale in-the-wild dataset
+geometry, orientation, and duplicate issues that affect the             for plant disease segmentation, version v7. Zenodo,
+validity of later experiments. The next empirical stage is              2025. URL https://zenodo.org/records/17719108. Ver-
+to freeze the data policy, train the selected configurations,           sion published November 25, 2025.
+and populate the quantitative and qualitative results. No
+model-accuracy conclusion is drawn in this draft.                   [6] PlantSeg local audit. PlantSeg v6 vs v7: Dataset statis-
+                                                                        tics, 2026. Project-local audit, October 7. Archived as
+                                                                        evidence/dataset-audit.md with flagged-files.csv. Pixel-
+References                                                              level and duplicate findings were not rerun for this
+                                                                        manuscript.
+[1] Tianqi Wei, Zhi Chen, Xin Yu, Scott Chapman, Paul
+    Melloy, and Zi Huang. PlantSeg: A large-scale in-               [7] PlantSeg structural snapshot. PlantSeg local structural
+    the-wild dataset for plant disease segmentation. arXiv              evidence snapshot, 2026. Generated October 30 by
+    preprint arXiv:2409.04038, 2024. URL https://arxiv.                 collect_evidence.py. File counts, metadata, raw JSON
+    org/abs/2409.04038.                                                 references, annotation-builder outputs, CLI defaults, and
+                                                                        source hashes; evidence/snapshot.json.
+
+
+
+
+                                                                7
+

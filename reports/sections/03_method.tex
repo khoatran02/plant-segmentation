@@ -1,0 +1,87 @@
+\section{Method}
+\subsection{Task formulation}
+Given an RGB image $I$ and a disease phrase $t$, the model produces a set of masks, localization boxes, and confidence scores:
+\begin{equation}
+ f_\theta(I,t)=\{(M_j,b_j,s_j)\}_{j=1}^{Q}.
+\end{equation}
+For semantic lesion evaluation, accepted instance masks are combined into a foreground union. A positive prompt names the disease assigned to the image. A negative prompt names another annotated disease category and is supervised to return no lesion instance. This negative supervision assumes that the image-level annotation is exhaustive for the queried concept; unannotated co-occurring symptoms may violate that assumption.
+
+Supplying the correct disease name defines \emph{disease-conditioned segmentation}. It does not establish automatic disease diagnosis. Querying all 115 names and selecting a disease is a separate evaluation task that the current validation routine does not implement.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[node distance=4mm,>=Latex,
+ box/.style={draw,rounded corners=2pt,align=center,text width=0.88\columnwidth,minimum height=8mm,font=\small}]
+\node[box,fill=green!8] (a) {Image + metadata disease name\\Positive or negative text query};
+\node[box,below=of a] (b) {SAM 3 visual features + text features\\Frozen trunk and language encoder by default};
+\node[box,below=of b,fill=blue!5] (c) {Trainable visual neck, fusion, decoder,\\localization and segmentation components};
+\node[box,below=of c] (d) {Presence score + query confidence + masks};
+\node[box,below=of d,fill=green!8] (e) {Threshold and mask union\\Positive IoU / query response statistics};
+\draw[->] (a)--(b);\draw[->] (b)--(c);\draw[->] (c)--(d);\draw[->] (d)--(e);
+\end{tikzpicture}
+\caption{Implemented image-model workflow. The diagram depicts the default adaptation scope; full fine-tuning is an optional script setting.}
+\label{fig:pipeline}
+\end{figure}
+
+\subsection{Backbone and adaptation scope}
+The implementation builds the SAM 3 image model with segmentation enabled and pretrained weights supplied locally or retrieved through the model builder. Its visual trunk uses a vision transformer; language features represent the supplied phrases. Fusion and decoding produce concept-conditioned localization and segmentation outputs. Figure~\ref{fig:pipeline} summarizes this path.
+
+The default \code{heads} scope freezes the visual transformer trunk and the language backbone. Other components, including the visual neck, remain trainable. Consequently the scope name should not be interpreted as training only a final prediction layer. The alternative \code{full} scope enables optimization of all parameters. No adaptation-scope comparison has yet been measured.
+
+With frozen language features, the script encodes the fixed disease vocabulary once, caches the resulting tensors, and removes the language module from the active model. This makes training dependent on that fixed prompt vocabulary. Experiments using alternative prompt wording require recomputing compatible features. Adaptation checkpoints save trainable parameters rather than a complete standalone model, so reproducing inference also requires the matching pretrained base and adaptation settings.
+
+\subsection{Prompt construction and sampling}
+Prompt text is the lowercased metadata disease name; the plant field is retained for negative sampling. During training the positive category is retained with probability 0.7. The default uses one prompt per image, so a selected example normally supplies either its positive disease or a negative disease, rather than both simultaneously.
+
+For remaining prompt slots, the sampler first requests up to $\lceil K/2\rceil$ absent diseases from the same plant and fills the remainder from other plants, where $K$ is the number of negative slots. With the one-prompt default, the negative is from the same plant whenever such a category is available. This creates a challenging contrast between diseases that share host appearance. Increasing the prompt count changes both query composition and memory demand.
+
+Validation always includes the positive disease and, by default, two negative categories. Negative selection uses an image-index-seeded random generator, providing repeatable choices within the same dataset ordering. The number of returned negatives can depend on available categories. A run must record its resulting prompt set and negative-query count for interpretation of false-positive rates.
+
+\subsection{Image transforms}
+The model path uses a 1,008-pixel reference resolution. Training decodes segmentations, applies a random horizontal flip and square scale jitter generated from a 480-pixel minimum, pads to $1{,}008\times1{,}008$, converts to tensors, and normalizes each channel with mean and standard deviation 0.5. Filters remove zero-area targets and restrict training examples to at most 200 output objects per query. Validation uses a deterministic square resize to the reference resolution and the same normalization.
+
+Resizing is shared between image and annotation geometry, but square resizing changes aspect ratio. Padding and low-resolution mask output also affect how an IoU score should be interpreted. Final PNG evaluation should explicitly map outputs to the original, orientation-corrected coordinate frame. That evaluation is an addition to the current validation helper.
+
+\subsection{Matching and supervision}
+The criterion uses binary Hungarian matching with class, box-distance, and generalized-IoU costs weighted 2, 5, and 2. An additional one-to-many matcher uses $\alpha=0.3$, threshold 0.4, and top-$k=4$, with an overall weight of 2. The loss wrapper combines localization, classification, presence, instance-mask, and semantic-region supervision.
+
+At the component level, configured weights are
+\begin{align}
+\mathcal L_{\mathrm{loc}} &=5\mathcal L_{\mathrm{box}}+2\mathcal L_{\mathrm{GIoU}},\\
+\mathcal L_{\mathrm{concept}} &=20\mathcal L_{\mathrm{cls}}+20\mathcal L_{\mathrm{pres}},\\
+\mathcal L_{\mathrm{inst}} &=200\mathcal L_{\mathrm{mask}}+10\mathcal L_{\mathrm{Dice}},\\
+\mathcal L_{\mathrm{sem}} &=20\mathcal L_{\mathrm{sem\mbox{-}focal}}
+                         +30\mathcal L_{\mathrm{sem\mbox{-}Dice}}.
+\end{align}
+These expressions summarize configured component weights; the upstream wrapper also handles matching branches, auxiliary outputs, and normalization. Instance-mask focal settings use $\alpha=0.25$, $\gamma=2$, while the semantic focal settings use $\alpha=0.6$, $\gamma=2$. The semantic criterion disables its separate presence-loss term. Instance-mask auxiliary losses are disabled. This is a composite supervised adaptation objective, not a single binary-mask loss.
+
+\subsection{Optimization and memory management}
+Table~\ref{tab:settings} gives the current command-line defaults, not a completed experiment's configuration. AdamW applies weight decay to multidimensional parameters and excludes biases and one-dimensional parameters. An inverse-square-root schedule includes warm-up and cooldown. The script evaluates each epoch, selects the best checkpoint by validation IoU, and writes a latest checkpoint.
+
+\begin{table}[t]
+\centering\small
+\caption{Implemented default configuration. Actual run settings and hardware remain to be recorded.}
+\label{tab:settings}
+\begin{tabular}{lr}\toprule
+Setting & Value\\\midrule
+Adaptation scope & Frozen trunk and text\\
+Epochs & 20\\
+Images per training batch & 1\\
+Gradient accumulation & 8\\
+Training prompts per image & 1\\
+Positive-prompt probability & 0.7\\
+Validation negative prompts & 2\\
+Transformer/head learning rate & $8\times10^{-5}$\\
+Visual-component learning rate & $2.5\times10^{-5}$\\
+Language learning rate (full scope) & $5\times10^{-6}$\\
+Weight decay / gradient clip norm & 0.1 / 0.1\\
+Requested warm-up steps & 100\\
+Cooldown fraction & 0.1\\
+Score threshold & 0.5\\
+Random seed / data workers & 0 / 4\\\bottomrule
+\end{tabular}
+\end{table}
+
+The nominal effective batch is eight images per optimizer update. The implemented loop updates only on complete accumulation groups; it does not flush a partial group at epoch end. With the unfiltered 5,367-image training set and batch size one, this gives 670 scheduled updates per epoch, subject to runtime filtering and skipped nonfinite losses. Warm-up is capped at one quarter of scheduled steps, and cooldown is at least one step.
+
+Mixed precision is selected from GPU capability, with optional reduced-precision storage for frozen modules. The code includes a differentiable fallback for a fused visual MLP and convolution-layout handling for older GPUs. These are implementation choices whose numerical stability and memory use require measurement on the eventual training machine; they are not evidence that a complete run fits a particular device.

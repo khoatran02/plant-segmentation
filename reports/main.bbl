@@ -1,0 +1,59 @@
+\begin{thebibliography}{7}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Wei et~al.(2024)Wei, Chen, Yu, Chapman, Melloy, and Huang]{plantseg}
+Tianqi Wei, Zhi Chen, Xin Yu, Scott Chapman, Paul Melloy, and Zi~Huang.
+\newblock {PlantSeg}: A large-scale in-the-wild dataset for plant disease
+  segmentation.
+\newblock \emph{arXiv preprint arXiv:2409.04038}, 2024.
+\newblock URL \url{https://arxiv.org/abs/2409.04038}.
+
+\bibitem[Carion et~al.(2025)Carion, Gustafson, Hu, Debnath, Hu, Suris,
+  et~al.]{sam3}
+Nicolas Carion, Laura Gustafson, Yuan-Ting Hu, Shoubhik Debnath, Ronghang Hu,
+  Didac Suris, et~al.
+\newblock {SAM 3}: Segment anything with concepts.
+\newblock \emph{arXiv preprint arXiv:2511.16719}, 2025.
+\newblock URL \url{https://arxiv.org/abs/2511.16719}.
+
+\bibitem[Ronneberger et~al.(2015)Ronneberger, Fischer, and Brox]{unet}
+Olaf Ronneberger, Philipp Fischer, and Thomas Brox.
+\newblock {U-Net}: Convolutional networks for biomedical image segmentation.
+\newblock \emph{arXiv preprint arXiv:1505.04597}, 2015.
+\newblock URL \url{https://arxiv.org/abs/1505.04597}.
+
+\bibitem[Chen et~al.(2018)Chen, Zhu, Papandreou, Schroff, and Adam]{deeplab}
+Liang-Chieh Chen, Yukun Zhu, George Papandreou, Florian Schroff, and Hartwig
+  Adam.
+\newblock Encoder-decoder with atrous separable convolution for semantic image
+  segmentation.
+\newblock \emph{arXiv preprint arXiv:1802.02611}, 2018.
+\newblock URL \url{https://arxiv.org/abs/1802.02611}.
+
+\bibitem[Wei et~al.(2025)Wei, Chen, Yu, Chapman, Melloy, and Huang]{plantsegv7}
+Tianqi Wei, Zhi Chen, Xin Yu, Scott Chapman, Paul Melloy, and Zi~Huang.
+\newblock A large-scale in-the-wild dataset for plant disease segmentation,
+  version v7.
+\newblock Zenodo, 2025.
+\newblock URL \url{https://zenodo.org/records/17719108}.
+\newblock Version published November 25, 2025.
+
+\bibitem[PlantSeg local audit()]{localaudit}
+PlantSeg local audit.
+\newblock {PlantSeg} v6 vs v7: Dataset statistics, 2026.
+\newblock Project-local audit, October 7. Archived as evidence/dataset-audit.md
+  with flagged-files.csv. Pixel-level and duplicate findings were not rerun for
+  this manuscript.
+
+\bibitem[PlantSeg structural snapshot()]{snapshot}
+PlantSeg structural snapshot.
+\newblock {PlantSeg} local structural evidence snapshot, 2026.
+\newblock Generated October 30 by collect\_evidence.py. File counts, metadata,
+  raw JSON references, annotation-builder outputs, CLI defaults, and source
+  hashes; evidence/snapshot.json.
+
+\end{thebibliography}

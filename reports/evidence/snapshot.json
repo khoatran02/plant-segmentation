@@ -1,0 +1,132 @@
+{
+  "generated_utc": "2026-10-30T13:14:17.128152+00:00",
+  "scope": "metadata, file presence, raw JSON structure and actual cache builder; no pixel re-audit or model run",
+  "sha256": {
+    "src/training.py": "c63e8b362cdf7f59f9844784bc09d4e777ac61b89aece81db013c12b3434311a",
+    "docs/plantseg-v6-v7-statistics.md": "6c147003472314611216178b57c32c983f4f14266e3a0e3889c3764dbba154e1",
+    "docs/plantseg-stats/flagged-files.csv": "55ed13aea08c18d596b18644956737bd207fa655f63c81745f496ffb0f87f186"
+  },
+  "sam3_commit": "8f0b7f4d4e7eda2ed606ebde6702c93359ad01da",
+  "training_cli_defaults": {
+    "--prompts_per_image": 1,
+    "--pos_prob": 0.7,
+    "--val_negatives": 2,
+    "--limit_train": null,
+    "--limit_val": null,
+    "--workers": 4,
+    "--checkpoint": null,
+    "--resume": null,
+    "--scope": "heads",
+    "--frozen_dtype": "auto",
+    "--amp": "auto",
+    "--trunk_compute": "auto",
+    "--epochs": 20,
+    "--batch_size": 1,
+    "--grad_accum": 8,
+    "--lr": 8e-05,
+    "--lr_vision": 2.5e-05,
+    "--lr_language": 5e-06,
+    "--weight_decay": 0.1,
+    "--clip_norm": 0.1,
+    "--warmup_steps": 100,
+    "--cooldown_frac": 0.1,
+    "--val_every": 1,
+    "--score_threshold": 0.5,
+    "--log_every": 10,
+    "--seed": 0
+  },
+  "datasets": {
+    "v6": {
+      "metadata_rows": 11458,
+      "metadata_class_ids": 114,
+      "host_plants": 34,
+      "splits": {
+        "train": {
+          "images": 7916,
+          "masks": 7916,
+          "json_images": 7916,
+          "json_categories": 0,
+          "annotations_listed": 52898,
+          "orphan_annotations": 0,
+          "json_sha256": "74581f713c81e22b62345bae6fd5f59a05b25439bf86f18e7a1cd6277c48480d",
+          "cache_images": 7916,
+          "cache_annotations": 52898,
+          "cache_categories": 114
+        },
+        "val": {
+          "images": 1247,
+          "masks": 1247,
+          "json_images": 1247,
+          "json_categories": 0,
+          "annotations_listed": 8927,
+          "orphan_annotations": 0,
+          "json_sha256": "27f850b60f08527ac02f7ce15f7cc1c861c1a5338482f7fef327e394e083175b",
+          "cache_images": 1247,
+          "cache_annotations": 8927,
+          "cache_categories": 114
+        },
+        "test": {
+          "images": 2295,
+          "masks": 2295,
+          "json_images": 2295,
+          "json_categories": 0,
+          "annotations_listed": 15569,
+          "orphan_annotations": 0,
+          "json_sha256": "07458c97253f47f42278f907c0931248c9cb4e7ffe8dc640acfd84d5c281f23f",
+          "cache_images": 2294,
+          "cache_annotations": 15569,
+          "cache_categories": 114
+        }
+      },
+      "metadata_sha256": "ee06537f4dd9a48b88070c9fd635357fb8ff353ee386b8578e4191038947e031",
+      "coverage_mean": 0.21359507927782287,
+      "coverage_median": 0.13657689116897376
+    },
+    "v7": {
+      "metadata_rows": 7774,
+      "metadata_class_ids": 115,
+      "host_plants": 34,
+      "splits": {
+        "train": {
+          "images": 5367,
+          "masks": 5367,
+          "json_images": 5367,
+          "json_categories": 0,
+          "annotations_listed": 52898,
+          "orphan_annotations": 14647,
+          "json_sha256": "176c5db19a66726d624d4a7336861583a1ac698c976ad323f994566b1b4f40e4",
+          "cache_images": 5367,
+          "cache_annotations": 38251,
+          "cache_categories": 115
+        },
+        "val": {
+          "images": 846,
+          "masks": 846,
+          "json_images": 846,
+          "json_categories": 0,
+          "annotations_listed": 8927,
+          "orphan_annotations": 2467,
+          "json_sha256": "e9c994d829e91f45cc02c2381a7c3292c300a3df524973c7b91b4524d8eb4c61",
+          "cache_images": 846,
+          "cache_annotations": 6460,
+          "cache_categories": 115
+        },
+        "test": {
+          "images": 1561,
+          "masks": 1561,
+          "json_images": 1561,
+          "json_categories": 0,
+          "annotations_listed": 15569,
+          "orphan_annotations": 4466,
+          "json_sha256": "83b48eb9ef82373232ecbc6a66099afee46fdb73d0c7310ad6229f9681e270ef",
+          "cache_images": 1560,
+          "cache_annotations": 11103,
+          "cache_categories": 115
+        }
+      },
+      "metadata_sha256": "03025e84fd4847e21a8cf1a7690b9c5ba40a933022f973df0a5611ffc0439fd2",
+      "coverage_mean": 0.2136208881573271,
+      "coverage_median": 0.13860423280423279
+    }
+  }
+}
