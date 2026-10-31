@@ -1,1 +1,10 @@
-data/*
+.DS_Store
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+outputs/
+*.egg-info/
+.ruff_cache
+datasets/

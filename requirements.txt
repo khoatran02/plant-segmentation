@@ -1,0 +1,16 @@
+# Python 3.12/3.13; torch/torchvision must be a matching CUDA pair on Kaggle.
+torch>=2.7,<2.9
+torchvision>=0.22,<0.24
+# Tested against this exact SAM3 API and save_pretrained/safetensors implementation.
+transformers==5.22.1
+huggingface_hub>=1.0,<2
+safetensors>=0.4.3
+# NumPy 1.26 supports Python <=3.12 and conflicts with Kaggle's NumPy 2 stack.
+numpy>=2.1,<3
+Pillow>=10,<13
+tqdm>=4.66
+pycocotools>=2.0.8
+scipy>=1.13,<1.17
+# Test and lint tools share this requirements file with the training dependencies.
+pytest>=8
+ruff>=0.9
