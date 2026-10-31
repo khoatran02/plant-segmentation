@@ -48,6 +48,65 @@ def test_broken_native_dependency_fails_before_ddp_or_dataset_preparation(monkey
     assert not output.exists()
 
 
+@pytest.mark.parametrize("token", [None, "hf_unit_test_not_a_real_token"])
+def test_gated_model_fails_before_ddp_or_dataset_work(monkeypatch, tmp_path, token):
+    import httpx
+    import huggingface_hub
+    from huggingface_hub import constants
+    from huggingface_hub.errors import GatedRepoError
+    from src import training
+
+    calls = []
+    response = httpx.Response(
+        401,
+        request=httpx.Request("HEAD", "https://huggingface.co/facebook/sam3/resolve/main/config.json"),
+    )
+    error = GatedRepoError("Access to model facebook/sam3 is restricted.", response=response)
+
+    def denied(url, *, token):
+        calls.append((url, token))
+        raise error
+
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", False)
+    monkeypatch.setattr(huggingface_hub, "get_token", lambda: token)
+    monkeypatch.setattr(huggingface_hub, "get_hf_file_metadata", denied)
+    output = tmp_path / "must-not-be-created"
+    monkeypatch.setattr(sys, "argv", ["train.py", "--output_dir", str(output)])
+    monkeypatch.setattr(
+        training, "setup", lambda _: pytest.fail("DDP started before model authorization check")
+    )
+    with pytest.raises(RuntimeError, match="Hugging Face denied access") as caught:
+        training.main()
+    assert caught.value.__cause__ is error
+    assert len(calls) == 1 and calls[0][1] == token
+    assert "/facebook/sam3/resolve/main/config.json" in calls[0][0]
+    if token is None:
+        assert "No Hugging Face token was found" in str(caught.value)
+    else:
+        assert "A Hugging Face token was found" in str(caught.value)
+        assert token not in str(caught.value)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("mode", ["local_directory", "local_files_only", "offline"])
+def test_local_or_offline_model_access_never_uses_network(monkeypatch, tmp_path, mode):
+    import huggingface_hub
+    from huggingface_hub import constants
+    from src.sam3_adapter import check_model_access
+
+    args = parse_args([])
+    if mode == "local_directory":
+        args.model_id = str(tmp_path)
+    args.local_files_only = mode == "local_files_only"
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", mode == "offline")
+    monkeypatch.setattr(
+        huggingface_hub,
+        "get_hf_file_metadata",
+        lambda *a, **kw: pytest.fail("Local/offline mode made a network request"),
+    )
+    check_model_access(args)
+
+
 def test_partial_accumulation_and_lr():
     assert [accumulation_window(i, 5, 3) for i in range(5)] == [
         (3, False),

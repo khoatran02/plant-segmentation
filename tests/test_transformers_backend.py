@@ -75,6 +75,34 @@ def test_real_safetensors_load_train_and_infer_without_original_sam3(
     assert (tiny_model_dir / "model.safetensors").is_file()
 
 
+def test_model_load_passes_explicit_token_to_all_loaders(
+    tiny_dataset, tiny_model_dir, tmp_path, monkeypatch
+):
+    from huggingface_hub import constants
+    from transformers import Sam3Config, Sam3Model, Sam3Processor
+
+    token = "hf_unit_test_not_a_real_token"
+    monkeypatch.setenv("HF_TOKEN", token)
+    monkeypatch.setattr(constants, "HF_HUB_DISABLE_IMPLICIT_TOKEN", True)
+    called = []
+
+    def wrap(loader, name):
+        def authenticated(*args, **kwargs):
+            assert kwargs.get("token") == token
+            called.append(name)
+            return loader(*args, **kwargs)
+
+        return authenticated
+
+    for cls in (Sam3Config, Sam3Model, Sam3Processor):
+        monkeypatch.setattr(cls, "from_pretrained", wrap(cls.from_pretrained, cls.__name__))
+    args = model_args(tiny_dataset, tiny_model_dir, tmp_path)
+    model, _ = prepare_model(args, torch.device("cpu"))
+    assert set(called) == {"Sam3Config", "Sam3Model", "Sam3Processor"}
+    assert token not in str(model._plantseg_identity)
+    assert token not in str(vars(args))
+
+
 def test_cached_text_matches_uncached_and_projection_receives_grad(
     tiny_dataset, tiny_model_dir, tmp_path
 ):

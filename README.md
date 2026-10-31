@@ -49,7 +49,7 @@ Model [facebook/sam3](https://huggingface.co/facebook/sam3) yêu cầu tài kho�
 import os
 from kaggle_secrets import UserSecretsClient
 
-os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")
+os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN").strip()
 ```
 
 Nếu `get_secret` báo `BackendError`, lỗi xảy ra ở bước lấy secret từ Kaggle, trước khi Hugging Face kiểm tra token. Trong **Add-ons → Secrets**, kiểm tra label chính xác là `HF_TOKEN` (phân biệt hoa/thường, không có khoảng trắng) và secret đã được bật cho notebook hiện tại. Nếu vẫn lỗi dù đã kiểm tra, có thể thay cell trên bằng cách nhập token ẩn cho session hiện tại:
@@ -61,19 +61,22 @@ from getpass import getpass
 os.environ["HF_TOKEN"] = getpass("Hugging Face token: ").strip()
 ```
 
-Không in giá trị token. Kiểm tra xác thực và quyền đọc config của model trước khi tải weights hoặc chạy DDP:
+Không in giá trị token. Kiểm tra xác thực và quyền đọc config của model trước khi tải weights hoặc chạy DDP. Truyền token tường minh và buộc tải lại config nhỏ để cache cũ không che khuất lỗi quyền:
 
 ```python
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import HfApi, get_token, hf_hub_download
 
-print("Hugging Face user:", HfApi().whoami()["name"])
-hf_hub_download("facebook/sam3", "config.json")
+token = get_token()
+if not token:
+    raise RuntimeError("Chưa có HF_TOKEN. Chạy lại cell đọc Kaggle Secret hoặc nhập token.")
+print("Hugging Face user:", HfApi(token=token).whoami()["name"])
+hf_hub_download("facebook/sam3", "config.json", token=token, force_download=True)
 print("Đã đọc được config SAM3.")
 ```
 
-`whoami()` thành công xác nhận token hợp lệ; tải `config.json` kiểm tra thêm quyền truy cập model. Nếu gặp 401/403, kiểm tra tài khoản được cấp quyền `facebook/sam3` và quyền đọc của token. Cell dùng `getpass` chỉ giữ token trong môi trường của session, cần chạy lại sau khi restart kernel.
+Nếu `whoami()` báo 401, token không được Hugging Face chấp nhận: cập nhật secret bằng token hợp lệ rồi chạy lại cell thiết lập. Nếu `whoami()` thành công nhưng tải `config.json` báo 401/403 hoặc `GatedRepoError`, mở [facebook/sam3](https://huggingface.co/facebook/sam3) bằng đúng tài khoản vừa in ra, chấp nhận điều kiện/gửi yêu cầu truy cập và kiểm tra yêu cầu đã được duyệt. Token cũng cần quyền đọc model đó; với token fine-grained, kiểm tra phạm vi truy cập gated model ([tài liệu Hugging Face](https://huggingface.co/docs/hub/security-tokens)). Token hợp lệ không tự cấp quyền cho model bị giới hạn. Cell dùng `getpass` chỉ giữ token trong môi trường của session, cần chạy lại sau khi restart kernel.
 
-Token được truyền qua môi trường tới worker, không ghi trong arguments/checkpoint/run-config. Có thể dùng `hf auth login` thay cho Kaggle Secrets nếu chạy terminal. Library không thay thế yêu cầu quyền truy cập model.
+Token được truyền qua môi trường tới worker và được truyền tường minh vào các lệnh `from_pretrained`, kể cả khi tắt implicit token. Token không ghi trong arguments/checkpoint/run-config. Train và launcher kiểm tra quyền đọc config qua HTTP trước khi khởi tạo DDP/chuẩn bị annotations; model local, `--local_files_only` hoặc `HF_HUB_OFFLINE=1` bỏ qua kiểm tra mạng. Có thể dùng `hf auth login` thay cho Kaggle Secrets nếu chạy terminal. Library không thay thế yêu cầu quyền truy cập model.
 
 ## Dữ liệu và nhãn
 

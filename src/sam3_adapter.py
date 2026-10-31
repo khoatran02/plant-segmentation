@@ -63,16 +63,55 @@ def load_sam3_api():
     return Sam3Config, Sam3Model, Sam3Processor
 
 
+def pretrained_options(args):
+    from huggingface_hub import get_token
+
+    return {
+        "revision": args.model_revision,
+        "cache_dir": str(args.cache_dir) if args.cache_dir else None,
+        "local_files_only": args.local_files_only,
+        # Explicit auth also works when HF_HUB_DISABLE_IMPLICIT_TOKEN is enabled.
+        # Keep this transient: tokens never enter args, checkpoints or model identity.
+        "token": get_token(),
+    }
+
+
+def check_model_access(args):
+    """Check remote config access before DDP/dataset work, even if a config is cached."""
+    from huggingface_hub import constants, get_hf_file_metadata, hf_hub_url
+    from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
+
+    if Path(args.model_id).is_dir() or args.local_files_only or constants.HF_HUB_OFFLINE:
+        return
+    options = pretrained_options(args)
+    url = hf_hub_url(args.model_id, "config.json", revision=args.model_revision)
+    try:
+        get_hf_file_metadata(url, token=options["token"])
+    except HfHubHTTPError as error:
+        status = error.response.status_code if error.response is not None else None
+        if not isinstance(error, GatedRepoError) and status not in (401, 403):
+            raise
+        authentication = (
+            "No Hugging Face token was found in this process. Set os.environ['HF_TOKEN'] "
+            "in a Python notebook cell before launching torchrun; rerun that cell after "
+            "a kernel restart."
+            if options["token"] is None
+            else "A Hugging Face token was found, but access was denied. Verify it with "
+            "HfApi().whoami(), confirm that the same account has approved model access, "
+            "and that the token has permission to read this gated model."
+        )
+        raise RuntimeError(
+            f"Hugging Face denied access to '{args.model_id}' (HTTP {status or '401/403'}). "
+            f"{authentication} Model access: https://huggingface.co/{args.model_id}. "
+            "Dependency installation cannot grant model access."
+        ) from error
+
+
 def build_model(args):
     import transformers
 
     Sam3Config, Sam3Model, Sam3Processor = load_sam3_api()
-
-    options = {
-        "revision": args.model_revision,
-        "cache_dir": str(args.cache_dir) if args.cache_dir else None,
-        "local_files_only": args.local_files_only,
-    }
+    options = pretrained_options(args)
     try:
         config = Sam3Config.from_pretrained(args.model_id, **options)
         resolved = getattr(config, "_commit_hash", None)

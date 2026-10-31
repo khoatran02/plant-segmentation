@@ -510,11 +510,14 @@ def main():
                 args.label_policy,
             )
         return
-    from src.sam3_adapter import load_sam3_api
+    from src.sam3_adapter import check_model_access, load_sam3_api
 
     load_sam3_api()
     if int(os.environ.get("RANK", 0)) == 0:
         print("[setup] Transformers SAM3 imports OK.", flush=True)
+    check_model_access(args)
+    if int(os.environ.get("RANK", 0)) == 0:
+        print("[setup] Model access check completed (skipped in local/offline mode).", flush=True)
     device = setup(args.device)
     try:
         train(args, device)
