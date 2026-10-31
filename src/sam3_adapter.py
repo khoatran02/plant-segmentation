@@ -49,9 +49,24 @@ def prepare_inputs(processor, images=None, text=None, max_text_length=32):
     return inputs
 
 
+def load_sam3_api():
+    """Check native/optional dependencies before dataset preparation or DDP startup."""
+    try:
+        from transformers import Sam3Config, Sam3Model, Sam3Processor
+    except (ImportError, OSError, RuntimeError) as error:
+        raise RuntimeError(
+            f"Could not import Transformers SAM3: {error}\n"
+            "Install the matching torch/torchvision/torchaudio releases with "
+            "'python -m pip install -r requirements.txt', then restart the notebook kernel. "
+            "This import check does not download model weights."
+        ) from error
+    return Sam3Config, Sam3Model, Sam3Processor
+
+
 def build_model(args):
     import transformers
-    from transformers import Sam3Config, Sam3Model, Sam3Processor
+
+    Sam3Config, Sam3Model, Sam3Processor = load_sam3_api()
 
     options = {
         "revision": args.model_revision,

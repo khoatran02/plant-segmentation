@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import socket
+from types import ModuleType
 
 import numpy as np
 import pytest
@@ -20,6 +21,31 @@ from src.runtime import (
     seed_everything,
 )
 from src.training import parse_args
+
+
+def test_broken_native_dependency_fails_before_ddp_or_dataset_preparation(monkeypatch, tmp_path):
+    from src import training
+
+    error = OSError("_torchaudio.abi3.so: undefined symbol: torch_library_impl")
+    broken_transformers = ModuleType("transformers")
+
+    def broken_import(name):
+        if name in {"Sam3Config", "Sam3Model", "Sam3Processor"}:
+            raise error
+        raise AttributeError(name)
+
+    broken_transformers.__getattr__ = broken_import
+    monkeypatch.setitem(sys.modules, "transformers", broken_transformers)
+    output = tmp_path / "must-not-be-created"
+    monkeypatch.setattr(sys, "argv", ["train.py", "--output_dir", str(output)])
+    monkeypatch.setattr(
+        training, "setup", lambda _: pytest.fail("DDP started before checking dependencies")
+    )
+    with pytest.raises(RuntimeError, match="torch_library_impl") as caught:
+        training.main()
+    assert caught.value.__cause__ is error
+    assert "pip install -r requirements.txt" in str(caught.value)
+    assert not output.exists()
 
 
 def test_partial_accumulation_and_lr():

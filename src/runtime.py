@@ -47,6 +47,7 @@ def setup(device_name: str = "cuda") -> torch.device:
         dist.init_process_group(
             backend="nccl" if device.type == "cuda" else "gloo",
             timeout=timedelta(minutes=60),
+            device_id=device if device.type == "cuda" else None,
         )
     return device
 

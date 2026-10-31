@@ -1,6 +1,8 @@
-# Python 3.12/3.13; torch/torchvision must be a matching CUDA pair on Kaggle.
-torch>=2.7,<2.9
-torchvision>=0.22,<0.24
+# Python 3.12/3.13; keep all compiled PyTorch extensions on matching releases.
+torch==2.8.0
+torchvision==0.23.0
+# Transformers imports audio utilities even for SAM3; replace Kaggle's mismatched build.
+torchaudio==2.8.0
 # Tested against this exact SAM3 API and save_pretrained/safetensors implementation.
 transformers==5.22.1
 huggingface_hub>=1.0,<2

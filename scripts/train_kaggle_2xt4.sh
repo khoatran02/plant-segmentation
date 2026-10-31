@@ -20,6 +20,8 @@ if [[ -n "${RESUME:-}" ]]; then
 fi
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+# Detect incompatible native extensions before spending time building annotations.
+python -c 'from src.sam3_adapter import load_sam3_api; load_sam3_api(); print("[setup] Transformers SAM3 imports OK.")'
 python train.py --prepare_only --dataset_dir "$DATASET_DIR" --output_dir "$OUTPUT_DIR" --annotation_source png --label_policy mask
 # The Transformers library downloads config, processor and safetensors into CACHE_DIR.
 # HF_TOKEN is inherited by torchrun workers; do not pass tokens as command-line arguments.

@@ -6,7 +6,7 @@ Pipeline dùng **Hugging Face Transformers `Sam3Model` và `Sam3Processor`**, t�
 
 Toàn bộ dependencies cho train, evaluate, test và lint được gộp trong một file `requirements.txt`.
 
-Chọn accelerator **GPU T4 x2**, bật Internet để tải dependencies/model lần đầu. Dùng Python 3.12 hoặc 3.13, NumPy 2.1 trở lên trong nhánh 2.x, PyTorch 2.7–2.8 và torchvision tương ứng (2.7/0.22 hoặc 2.8/0.23). `requirements.txt` pin Transformers **5.22.1**, phiên bản đã kiểm thử API. Trainer chính chạy CUDA; kiểm thử SAM3 nhỏ, chuẩn bị dữ liệu và đánh giá PNG baseline chạy trên CPU/macOS.
+Chọn accelerator **GPU T4 x2**, bật Internet để tải dependencies/model lần đầu. Dùng Python 3.12 hoặc 3.13, NumPy 2.1 trở lên trong nhánh 2.x. `requirements.txt` pin bộ tương thích **torch 2.8.0 / torchvision 0.23.0 / torchaudio 2.8.0** theo [hướng dẫn PyTorch](https://pytorch.org/get-started/previous-versions/) và Transformers **5.22.1**, phiên bản đã kiểm thử API. Trainer chính chạy CUDA; kiểm thử SAM3 nhỏ, chuẩn bị dữ liệu và đánh giá PNG baseline chạy trên CPU/macOS.
 
 ```bash
 # Chạy tại thư mục gốc source. Cài Transformers và dependencies; không clone SAM3 upstream.
@@ -15,6 +15,22 @@ python -c "import torch; print(torch.__version__, torch.cuda.device_count()); as
 ```
 
 Trong notebook, cài bằng `%pip install -r requirements.txt` tại thư mục gốc source. Nếu đã chạy requirements cũ và thấy NumPy bị hạ xuống `1.26.4`, cập nhật source/requirements trước rồi cài lại. NumPy 1.26 chỉ hỗ trợ Python 3.9–3.12 ([release notes](https://numpy.org/doc/2.1/release/1.26.4-notes.html)); không dùng ràng buộc `numpy<2` trên session Python 3.13. Sau khi cài, restart kernel để nạp lại thư viện rồi chạy lại các cell thiết lập/token. Nếu session đã bị thay đổi nhiều package và vẫn lỗi import, tạo session mới để khôi phục môi trường nền trước khi cài requirements đã sửa; restart kernel đơn thuần không hoàn tác các package đã cài.
+
+Nếu log dừng ở `torchaudio/lib/_torchaudio.abi3.so: undefined symbol: torch_library_impl`, bản torchaudio cài sẵn không tương thích với torch. Transformers import audio utilities khi nạp SAM3 dù pipeline chỉ xử lý ảnh. Cập nhật `requirements.txt` rồi chạy `%pip install -r requirements.txt` và restart kernel. Trước khi chạy `torchrun`, kiểm tra bằng cell sau (không tải model weights):
+
+```python
+import torch
+import torchvision
+import torchaudio
+from src.sam3_adapter import load_sam3_api
+
+load_sam3_api()
+print("torch / torchvision / torchaudio:", torch.__version__, torchvision.__version__, torchaudio.__version__)
+print("CUDA:", torch.version.cuda, "GPU count:", torch.cuda.device_count())
+assert torch.cuda.is_available() and torch.cuda.device_count() == 2
+```
+
+Entry point train kiểm tra import SAM3 trước khi khởi tạo DDP hoặc chuẩn bị annotations để lỗi môi trường xuất hiện ngay. Launcher cũng kiểm tra trước bước `--prepare_only`. Log `[data]` cho biết đang chuẩn bị dữ liệu, `[model]` cho biết đang tải model; vòng train chỉ bắt đầu khi có `[run]` và thanh tiến trình `epoch`.
 
 Model được khởi tạo qua thư viện:
 

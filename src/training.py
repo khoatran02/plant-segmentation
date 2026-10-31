@@ -169,6 +169,7 @@ def train(args, device):
     seed_everything(args.seed)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if rank() == 0:
+        print("[data] Preparing train/val annotations (first run can take several minutes).", flush=True)
         for split in ("train", "val"):
             build_coco_split(
                 args.dataset_dir,
@@ -180,6 +181,8 @@ def train(args, device):
             )
     barrier()
     dtype = resolve_dtype(args.amp, device)
+    if rank() == 0:
+        print(f"[model] Loading SAM3: {args.model_id}", flush=True)
     model, frozen = prepare_model(args, device)
     train_set = PlantSegDataset(args, "train", training=True)
     generator = torch.Generator().manual_seed(args.seed + rank())
@@ -507,6 +510,11 @@ def main():
                 args.label_policy,
             )
         return
+    from src.sam3_adapter import load_sam3_api
+
+    load_sam3_api()
+    if int(os.environ.get("RANK", 0)) == 0:
+        print("[setup] Transformers SAM3 imports OK.", flush=True)
     device = setup(args.device)
     try:
         train(args, device)
