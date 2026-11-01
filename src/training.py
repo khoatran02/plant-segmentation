@@ -28,8 +28,6 @@ from src.data import (
     categories_from_metadata,
     load_metadata,
 )
-from src.sam3_adapter import add_model_arguments
-
 from src.runtime import (
     accumulation_window,
     barrier,
@@ -47,6 +45,7 @@ from src.runtime import (
     world_size,
     write_json,
 )
+from src.sam3_adapter import add_model_arguments
 
 
 def resolve_dtype(name, device):
@@ -127,6 +126,7 @@ def checkpoint_payload(
     return {
         "format_version": 3,
         "model_identity": model._plantseg_identity,
+        "input_image_size": getattr(model, "_plantseg_image_size", None),
         "trainable": {n: p.detach().cpu() for n, p in model.named_parameters() if p.requires_grad},
         "optimizer": optimizer.state_dict(),
         "scaler": scaler.state_dict(),
@@ -159,17 +159,19 @@ def revision(path):
 
 
 def train(args, device):
-    from src.sam3_data import PlantSegDataset, to_device
-    from src.losses import CORE_LOSS_KEY
-
     from src import sam3_adapter as adapter
     from src.evaluation import evaluate
+    from src.losses import CORE_LOSS_KEY
+    from src.sam3_data import PlantSegDataset, to_device
 
     # Identical initial parameters on every rank, then independent sampling RNG streams.
     seed_everything(args.seed)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if rank() == 0:
-        print("[data] Preparing train/val annotations (first run can take several minutes).", flush=True)
+        print(
+            "[data] Preparing train/val annotations (first run can take several minutes).",
+            flush=True,
+        )
         for split in ("train", "val"):
             build_coco_split(
                 args.dataset_dir,
@@ -228,6 +230,7 @@ def train(args, device):
         "gpu": torch.cuda.get_device_name(device),
         "world_size": world_size(),
         "effective_batch_size": args.batch_size * world_size() * args.grad_accum,
+        "input_image_size": model._plantseg_image_size,
         "updates_per_epoch": updates_per_epoch,
         "total_updates": total_updates,
         "warmup_updates": warmup,
@@ -266,11 +269,19 @@ def train(args, device):
         restore_rng(state["rng_states"][rank()], generator)
     elif (args.output_dir / "last.pt").exists():
         raise ValueError("Output contains last.pt; use --resume or a new --output_dir")
+    elif args.init_from:
+        load_adaptation(model, args.init_from, allow_resolution_change=True)
+        if rank() == 0:
+            print(
+                f"[init] Loaded adaptation weights from {args.init_from}; "
+                "starting a new optimizer/LR schedule and checkpoint selection.",
+                flush=True,
+            )
     if rank() == 0:
         write_json(args.output_dir / "run-config.json", config)
         model._plantseg_processor.save_pretrained(args.output_dir / "processor")
         print(
-            f"[run] {world_size()} GPU, effective batch={config['effective_batch_size']}, trainable={sum(p.numel() for p in trainable) / 1e6:.1f}M, eval={args.eval_mode}",
+            f"[run] {world_size()} GPU, image_size={model._plantseg_image_size}, effective batch={config['effective_batch_size']}, trainable={sum(p.numel() for p in trainable) / 1e6:.1f}M, eval={args.eval_mode}",
             flush=True,
         )
     log_path = args.output_dir / "log.jsonl"
@@ -388,9 +399,10 @@ def train(args, device):
             record["checkpoint_seconds"] = time.monotonic() - checkpoint_started
             record["epoch_seconds"] = time.monotonic() - started
             log(record)
+            best_display = f"{best:.5f}" if best >= 0 else "N/A (not validated yet)"
             print(
                 f"[epoch {epoch + 1}] loss={record['train_loss']:.4f}, step={step}, "
-                f"best {args.selection_metric}={best:.5f}, train={record['seconds']:.1f}s, "
+                f"best {args.selection_metric}={best_display}, train={record['seconds']:.1f}s, "
                 f"val={record.get('val_evaluation_seconds', 0):.1f}s, "
                 f"save={record['checkpoint_seconds']:.1f}s",
                 flush=True,
@@ -433,9 +445,16 @@ def parse_args(argv=None):
     parser.add_argument("--workers", "--num_workers", dest="workers", type=int, default=2)
     add_model_arguments(parser)
     parser.add_argument("--no_pretrained", action="store_true")
-    parser.add_argument("--resume", type=Path)
+    initialization = parser.add_mutually_exclusive_group()
+    initialization.add_argument("--resume", type=Path)
+    initialization.add_argument(
+        "--init_from",
+        type=Path,
+        help="Initialize adaptation weights for a new run, allowing a new image size; reset optimizer/LR/metrics",
+    )
     parser.add_argument(
-        "--resume_allow_val_schedule_change", action="store_true",
+        "--resume_allow_val_schedule_change",
+        action="store_true",
         help="Allow changing only val_every on resume; retain best metric, reset patience",
     )
     parser.add_argument("--scope", choices=("heads", "full"), default="heads")
@@ -471,7 +490,9 @@ def parse_args(argv=None):
     parser.add_argument("--min_delta", type=float, default=0.0)
     parser.add_argument("--val_every", type=int, default=1)
     parser.add_argument(
-        "--eval_prompt_batch_size", type=int, default=1,
+        "--eval_prompt_batch_size",
+        type=int,
+        default=1,
         help="Prompts per inference batch sharing one image; increase after checking GPU memory",
     )
     parser.add_argument("--eval_mode", choices=("oracle", "all_classes"), default="oracle")
@@ -499,7 +520,7 @@ def parse_args(argv=None):
     ):
         if getattr(args, name) < 1:
             parser.error(f"--{name} must be positive")
-    for name in ("limit_train", "limit_val"):
+    for name in ("limit_train", "limit_val", "image_size"):
         if getattr(args, name) is not None and getattr(args, name) < 1:
             parser.error(f"--{name} must be positive")
     for name in ("pos_prob", "warmup_ratio", "score_threshold", "mask_threshold"):

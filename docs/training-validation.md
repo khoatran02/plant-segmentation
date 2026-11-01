@@ -1,5 +1,17 @@
 # Kiểm tra pipeline Transformers SAM3 — 2026-10-31
 
+## Dọn source và format — 2026-11-01
+
+Đã bỏ checkout/submodule SAM3 upstream không dùng, visualizer COCO độc lập, hướng dẫn Hydra cũ, collector báo cáo không còn tương thích và các file build/cache thừa. Bản thảo, bằng chứng lịch sử, dataset và output được giữ. Ruff format và import sorting áp dụng cho toàn bộ Python source/tests, có cấu hình duy trì trong `pyproject.toml`. Sau khi xóa upstream: **45 tests passed**, lint/format check, train/evaluate `--help`, cú pháp shell và `git diff --check` đều thành công.
+
+## Cập nhật độ phân giải — 2026-11-01
+
+Launcher Kaggle chuyển mặc định sang 672 × 672, validation mỗi 3 epoch, batch prompt đánh giá 2. CLI thêm `--image_size`; thay đổi đồng bộ processor, global RoPE grids và FPN metadata trước khi khởi tạo model, giữ nguyên learned positional weights của pretrained. `--init_from` nạp adaptation weights để bắt đầu run ở độ phân giải mới; `--resume`/evaluate từ chối kích thước khác checkpoint.
+
+Kiểm thử cập nhật: **45 passed**, lint và kiểm tra cú pháp shell thành công. Đã kiểm tra safetensors 32 → 16/48, backward cả scope heads/full với checkpointing, processor save/load, inference mask ở kích thước ảnh gốc và checkpoint cũ chưa ghi độ phân giải. Test đầu vào **672 × 672** dùng Sam3Model thật với patch **14**, pretrain image **336**, window **24**, cả window/global attention; hidden size/query/layer được thu nhỏ để chạy CPU. Loss hữu hạn, gradient qua global attention hữu hạn, validation all-classes chạy trên ảnh gốc. DDP Gloo kiểm tra độ phân giải tùy chỉnh 16 thay cho kích thước gốc 32 của fixture.
+
+Chưa benchmark pretrained SAM3 đầy đủ trên CUDA/T4, chưa đo IoU/Dice sau fine-tuning 672; mức giảm 55,6% là số pixel đầu vào, không phải số đo giảm thời gian hoặc VRAM. Các kết quả kiểm thử lịch sử bên dưới giữ nguyên theo thời điểm ghi nhận.
+
 Môi trường local: macOS ARM64, Python 3.12.14, torch 2.8.0, torchvision 0.23.0, Transformers 5.22.1, NumPy 1.26.4. Không có CUDA.
 
 ## Kiểm tra đã hoàn tất

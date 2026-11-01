@@ -2,6 +2,8 @@
 
 Inspected 2026-10-30. Paths below are relative to the project root unless prefixed with `reports/`.
 
+Archive note (2026-11-01): the table maps the historical manuscript to the implementation inspected on October 30. The upstream checkout, Hydra guide and obsolete `collect_evidence.py` have since been removed. Current source layout and usage are documented in the project README.
+
 | Manuscript topic | Evidence |
 |---|---|
 | Local v6/v7 file and metadata totals | `reports/collect_evidence.py`, `reports/evidence/snapshot.json` |

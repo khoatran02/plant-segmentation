@@ -27,9 +27,9 @@ Trong lượt rà soát này không sửa LaTeX, PDF, mã huấn luyện hay dat
 | [sections/05_results.tex](sections/05_results.tex) | Results | Chỉ có kết quả chuẩn bị dữ liệu; các bảng hiệu năng mô hình còn `Pending` |
 | [sections/06_discussion.tex](sections/06_discussion.tex) | Cả Discussion and Limitations và Conclusion | Giới hạn phạm vi kết luận và nêu bước thực nghiệm tiếp theo |
 | [references.bib](references.bib) | Nguồn thư mục BibTeX | Sửa thông tin trích dẫn tại đây |
-| [main.bbl](main.bbl) | Danh mục tài liệu tham khảo do BibTeX sinh | Là sản phẩm build; nên tái sinh từ `.bib` |
+| `main.bbl` (sinh khi build) | Danh mục tài liệu tham khảo do BibTeX sinh | Không lưu trong source; tái sinh từ `.bib` |
 | [build.sh](build.sh) | Chạy pdfLaTeX, BibTeX rồi pdfLaTeX hai lần | Giải quyết trích dẫn, số bảng/hình và tham chiếu chéo |
-| [collect_evidence.py](collect_evidence.py) | Tạo snapshot cấu trúc dữ liệu và mặc định CLI | Cần dữ liệu local; không chạy mô hình và không lặp lại audit pixel/duplicate |
+| `collect_evidence.py` (đã gỡ ngày 01/11/2026) | Script thu thập snapshot của pipeline cũ | Snapshot lịch sử được giữ; script không còn tương thích source hiện tại |
 | [evidence/snapshot.json](evidence/snapshot.json) | Số lượng, hash và mặc định được lưu từ lần thu thập trước | Là một bản ghi có thời điểm, không tự cập nhật theo máy đang mở repo |
 | [evidence/dataset-audit.md](evidence/dataset-audit.md) | Bản lưu audit dữ liệu | Đọc cùng CSV lỗi và ghi nhớ đây là audit lịch sử |
 | [evidence/flagged-files.csv](evidence/flagged-files.csv) | Danh sách ảnh có vấn đề | Là đầu vào có thể dùng để xây manifest kiểm soát chất lượng |

@@ -1,17 +1,18 @@
 """Train a real tiny Transformers SAM3 with DDP + nonreentrant checkpointing on CPU."""
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
+
 from src.losses import PlantSegCriterion
-from src.runtime import setup, cleanup, gather_objects
+from src.runtime import cleanup, gather_objects, setup
 from src.sam3_adapter import set_train_mode
 from src.sam3_data import PlantSegDataset
-from src.training import parse_args, prepare_model, TrainingLoss, make_train_loader
+from src.training import TrainingLoss, make_train_loader, parse_args, prepare_model
 
 
 def main():
@@ -34,13 +35,15 @@ def main():
                 "0",
                 "--loss_mask_size",
                 "8",
+                "--image_size",
+                "16",
                 "--pos_prob",
                 "1",
             ]
         )
         # Avoid cache creation races in this isolated CPU test.
-        from src.runtime import rank, barrier
         from src.data import build_coco_split
+        from src.runtime import barrier, rank
 
         if rank() == 0:
             build_coco_split(args.dataset_dir, "train", args.output_dir)

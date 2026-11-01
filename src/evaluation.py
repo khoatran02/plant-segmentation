@@ -17,10 +17,10 @@ from tqdm import tqdm
 from src.data import (
     DEFAULT_DATASET_DIR,
     categories_from_metadata,
+    dataset_fingerprint,
     load_metadata,
     load_pair,
     split_samples,
-    dataset_fingerprint,
 )
 from src.metrics import SegmentationMetrics
 from src.runtime import (
@@ -65,6 +65,7 @@ class Sam3SemanticPredictor:
 
     def _text_inputs(self, categories):
         from transformers.modeling_outputs import BaseModelOutputWithPooling
+
         from src.sam3_adapter import prepare_inputs
 
         key = tuple((c["id"], c["name"]) for c in categories)
@@ -94,7 +95,9 @@ class Sam3SemanticPredictor:
 
         # Broadcast the single image's features; never run the backbone per prompt.
         return Sam3VisionEncoderOutput(
-            fpn_hidden_states=tuple(t.expand(count, *t.shape[1:]) for t in vision.fpn_hidden_states),
+            fpn_hidden_states=tuple(
+                t.expand(count, *t.shape[1:]) for t in vision.fpn_hidden_states
+            ),
             fpn_position_encoding=tuple(
                 t.expand(count, *t.shape[1:]) for t in vision.fpn_position_encoding
             ),
@@ -149,7 +152,11 @@ def evaluate(model, args, split, device, dtype, output_prefix=None):
     if model is not None:
         model.eval()
         predictor = Sam3SemanticPredictor(
-            model, device, dtype, args.score_threshold, args.mask_threshold,
+            model,
+            device,
+            dtype,
+            args.score_threshold,
+            args.mask_threshold,
             getattr(args, "eval_prompt_batch_size", 1),
         )
     prediction_dir = getattr(args, "prediction_dir", None)
@@ -208,6 +215,7 @@ def evaluate(model, args, split, device, dtype, output_prefix=None):
             "limited": limit is not None,
             "world_size": world_size(),
             "eval_prompt_batch_size": getattr(args, "eval_prompt_batch_size", 1),
+            "input_image_size": getattr(model, "_plantseg_image_size", None),
             "evaluation_seconds": time.monotonic() - started,
         }
     )
@@ -264,6 +272,8 @@ def main():
     args = parser.parse_args()
     if args.eval_prompt_batch_size < 1:
         parser.error("--eval_prompt_batch_size must be positive")
+    if args.image_size is not None and args.image_size < 1:
+        parser.error("--image_size must be positive")
     if not 0 <= args.score_threshold <= 1 or not 0 <= args.mask_threshold <= 1:
         parser.error("thresholds must be in [0, 1]")
     if any(v is not None and v < 1 for v in (args.limit_val, args.limit_test)):

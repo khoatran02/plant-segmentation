@@ -2,6 +2,8 @@
 
 English, two-column A4 LaTeX paper based on the current PlantSeg files and SAM 3 training implementation. This is a research-paper draft with model results intentionally left pending. Author and affiliation are blank because none were supplied.
 
+**Archive status (2026-11-01):** this draft and its evidence describe the pre-refactor pipeline inspected on October 30. They are retained as research artifacts, not as instructions for the current Transformers trainer. Use [the project README](../README.md) for training/evaluation. The obsolete `collect_evidence.py` depended on removed functions, old dataset paths and the upstream SAM3 checkout; it has been removed. The existing snapshots remain historical records. BibTeX output and PDF text extracts are regenerated when needed instead of being tracked as source.
+
 - `main.pdf`: compiled paper.
 - `main.tex`: entry point and formatting.
 - `sections/01_introduction.tex`: introduction and related work.
@@ -20,19 +22,15 @@ English, two-column A4 LaTeX paper based on the current PlantSeg files and SAM 3
 Requires a TeX installation containing pdfLaTeX, BibTeX, `natbib`, `balance`, `geometry`, `mathptmx`, `microtype`, `tikz`, `caption`, `tabularx`, `booktabs`, and `hyperref`.
 
 ```bash
-cd /home/workspace/works/projects/school/Master/TGMTNC/plant-segmentation/reports
+cd reports
 bash build.sh
 ```
 
 The report builds from the files in this directory; neither PyTorch nor dataset access is required. The layout is a generic academic paper, with no claim of compliance with a specific journal or conference template.
 
-## Refresh structural evidence
+## Structural evidence
 
-```bash
-python3 collect_evidence.py
-```
-
-This requires the parent project and Python's standard library. It reads both local dataset releases, extracts and executes only the three annotation preparation functions from `src/training.py` in a temporary directory, and captures the resulting counts. It does not import the training module, require GPU dependencies, run a model, modify the datasets, or refresh the archived pixel-level/duplicate audit. Check the regenerated JSON against the manuscript before rebuilding; manuscript prose is not automatically rewritten.
+`evidence/snapshot.json` is the archived October 30 snapshot. It is not refreshed by the current training pipeline. Current runs record model/dataset identity, resolution and configuration in `run-config.json`, and metrics in the evaluation JSON files documented in the project README.
 
 ## Add model results later
 

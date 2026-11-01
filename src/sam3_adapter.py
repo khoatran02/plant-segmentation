@@ -30,6 +30,35 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         help="Use cached/local model files without network access",
     )
     parser.add_argument("--attn_implementation", choices=("sdpa", "eager"), default="sdpa")
+    parser.add_argument(
+        "--image_size",
+        type=int,
+        help="Square input resolution (e.g. 672); omit to use the pretrained model size",
+    )
+
+
+def configure_input_resolution(config, processor, image_size):
+    """Set resolution before constructing ViT's nonpersistent global RoPE grids.
+
+    Keep pretrain_image_size and learned positional weights unchanged so the
+    original safetensors load exactly. The embedding layer tiles these weights.
+    """
+    if image_size is None:
+        return
+    patch = config.vision_config.backbone_config.patch_size
+    if not isinstance(patch, int):
+        if len(set(patch)) != 1:
+            raise ValueError("--image_size requires square ViT patches")
+        patch = patch[0]
+    if image_size <= 0 or image_size % (2 * patch):
+        raise ValueError(f"--image_size must be a positive multiple of {2 * patch}")
+    grid = image_size // patch
+    config.image_size = image_size
+    sizes = [int(grid * scale) for scale in config.vision_config.scale_factors[:-1]]
+    config.vision_config.backbone_feature_sizes = [[size, size] for size in sizes]
+    processor.image_processor.size = {"height": image_size, "width": image_size}
+    processor.image_processor.mask_size = {"height": sizes[0], "width": sizes[0]}
+    processor.target_size = image_size
 
 
 def prepare_inputs(processor, images=None, text=None, max_text_length=32):
@@ -118,6 +147,11 @@ def build_model(args):
         if resolved is not None:
             options["revision"] = resolved
         processor = Sam3Processor.from_pretrained(args.model_id, **options)
+        native_size = config.image_size
+        native_size = (
+            [native_size, native_size] if isinstance(native_size, int) else list(native_size)
+        )
+        configure_input_resolution(config, processor, getattr(args, "image_size", None))
         if args.no_pretrained:
             config._attn_implementation = args.attn_implementation
             model = Sam3Model(config)
@@ -162,6 +196,9 @@ def build_model(args):
         "metadata_sha256": file_sha256(args.dataset_dir / "Metadata.csv"),
     }
     model._plantseg_processor = processor
+    model._plantseg_native_image_size = native_size
+    size = model.config.image_size
+    model._plantseg_image_size = [size, size] if isinstance(size, int) else list(size)
     return model
 
 
@@ -256,6 +293,7 @@ def configure_activation_checkpointing(model, enabled):
     when frozen-encoder features do not. Dropout RNG and AMP state are preserved.
     """
     from functools import wraps
+
     from torch.utils.checkpoint import checkpoint
 
     blocks = [

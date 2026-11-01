@@ -1,9 +1,9 @@
-from pathlib import Path
 import random
-from types import SimpleNamespace
 import socket
 import subprocess
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -12,9 +12,9 @@ import torch
 from src.data import categories_from_metadata, load_metadata
 from src.evaluation import Sam3SemanticPredictor
 from src.losses import PlantSegCriterion
-from src.sam3_adapter import configure_trainable, cache_text_features, forward_model, prepare_inputs
-from src.sam3_data import PlantSegDataset, PlantSegCollator, choose_categories
-from src.training import TrainingLoss, parse_args, prepare_model, make_train_loader
+from src.sam3_adapter import cache_text_features, configure_trainable, forward_model, prepare_inputs
+from src.sam3_data import PlantSegCollator, PlantSegDataset, choose_categories
+from src.training import TrainingLoss, make_train_loader, parse_args, prepare_model
 
 
 def model_args(tiny_dataset, tiny_model_dir, tmp_path, scope="heads"):
@@ -128,6 +128,136 @@ def test_cached_text_matches_uncached_and_projection_receives_grad(
     assert model.text_projection.weight.grad is not None
 
 
+@pytest.mark.parametrize("image_size", [16, 48])
+@pytest.mark.parametrize("scope", ["heads", "full"])
+def test_resized_safetensors_forward_backward_and_native_evaluation(
+    tiny_dataset, tiny_model_dir, tmp_path, image_size, scope
+):
+    from transformers import Sam3Config, Sam3Processor
+
+    args = model_args(tiny_dataset, tiny_model_dir, tmp_path, scope)
+    args.image_size = image_size
+    model, frozen = prepare_model(args, torch.device("cpu"))
+    assert model.config.image_size == image_size
+    assert model.config.vision_config.backbone_config.pretrain_image_size == 32
+    # Learned positional tensors retain their original checkpoint dimensions.
+    assert model.vision_encoder.backbone.embeddings.position_embeddings.shape == (1, 16, 32)
+    grid = image_size // 8
+    assert model.config.vision_config.backbone_feature_sizes == [
+        [4 * grid, 4 * grid],
+        [2 * grid, 2 * grid],
+        [grid, grid],
+    ]
+    layer = model.vision_encoder.backbone.layers[0]
+    assert layer.position_ids.shape == (grid * grid, 2)
+    dataset = PlantSegDataset(args)
+    loader, _ = make_train_loader(dataset, args, torch.Generator().manual_seed(1), model)
+    batch = next(iter(loader))
+    assert batch["inputs"]["pixel_values"].shape == (1, 3, image_size, image_size)
+    model.train()
+    for module in frozen:
+        module.eval()
+    loss = TrainingLoss(model, PlantSegCriterion())(batch)["loss"]
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert torch.isfinite(model.mask_decoder.instance_projection.weight.grad).all()
+    if scope == "full":
+        assert torch.isfinite(layer.attention.q_proj.weight.grad).all()
+    model.eval()
+    categories = categories_from_metadata(load_metadata(tiny_dataset))
+    prediction = Sam3SemanticPredictor(model, torch.device("cpu"), None, 0.0, 0.5, 2)(
+        dataset[0]["image"], categories
+    )
+    assert prediction.shape == (8, 12)
+    saved = tmp_path / "resized-processor"
+    model._plantseg_processor.save_pretrained(saved)
+    processor = Sam3Processor.from_pretrained(saved, local_files_only=True)
+    assert processor.image_processor.size == {"height": image_size, "width": image_size}
+    assert processor.target_size == image_size
+    # Source files are not rewritten when overriding resolution.
+    assert Sam3Config.from_pretrained(tiny_model_dir).image_size == 32
+
+
+def test_resolution_checkpoint_guard_and_weights_only_initialization(
+    tiny_dataset, tiny_model_dir, tmp_path
+):
+    from src.runtime import load_adaptation, rng_state
+    from src.training import checkpoint_payload, save_checkpoint
+
+    args = model_args(tiny_dataset, tiny_model_dir, tmp_path)
+    model, _ = prepare_model(args, torch.device("cpu"))
+    optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad])
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    state = checkpoint_payload(model, optimizer, scaler, args, 0, 1, 0.5, 0, [rng_state()], {})
+    path = tmp_path / "last.pt"
+    save_checkpoint(path, state)
+    args.image_size = 16
+    resized, _ = prepare_model(args, torch.device("cpu"))
+    for expected_args in (None, args):
+        with pytest.raises(ValueError, match="Checkpoint input resolution"):
+            load_adaptation(resized, path, expected_args)
+    load_adaptation(resized, path, allow_resolution_change=True)
+    torch.testing.assert_close(
+        resized.mask_decoder.instance_projection.weight,
+        model.mask_decoder.instance_projection.weight,
+    )
+    # Legacy checkpoints without a size field used the original model resolution.
+    state.pop("input_image_size")
+    save_checkpoint(path, state)
+    with pytest.raises(ValueError, match="Checkpoint input resolution"):
+        load_adaptation(resized, path)
+    load_adaptation(model, path)
+
+
+def test_672_input_with_production_patch_window_and_global_attention(
+    tiny_dataset, tiny_model_dir, tmp_path
+):
+    from transformers import Sam3Config, Sam3Model, Sam3Processor
+
+    # Retain small hidden dimensions, but use SAM3's real spatial geometry.
+    config = Sam3Config.from_pretrained(tiny_model_dir)
+    backbone = config.vision_config.backbone_config
+    backbone.image_size = 1008
+    backbone.patch_size = 14
+    backbone.pretrain_image_size = 336
+    backbone.window_size = 24
+    backbone.num_hidden_layers = 2
+    backbone.global_attn_indexes = [1]
+    config.vision_config.backbone_feature_sizes = [[288, 288], [144, 144], [72, 72]]
+    source = tmp_path / "sam3-spatial"
+    Sam3Model(config).save_pretrained(source, safe_serialization=True)
+    processor = Sam3Processor.from_pretrained(tiny_model_dir)
+    processor.image_processor.size = {"height": 1008, "width": 1008}
+    processor.save_pretrained(source)
+    args = model_args(tiny_dataset, source, tmp_path, "full")
+    args.image_size = 672
+    model, _ = prepare_model(args, torch.device("cpu"))
+    assert model.config.vision_config.backbone_feature_sizes == [[192, 192], [96, 96], [48, 48]]
+    assert model.vision_encoder.backbone.layers[0].position_ids.shape == (24 * 24, 2)
+    assert model.vision_encoder.backbone.layers[1].position_ids.shape == (48 * 48, 2)
+    loader, _ = make_train_loader(
+        PlantSegDataset(args), args, torch.Generator().manual_seed(1), model
+    )
+    batch = next(iter(loader))
+    assert batch["inputs"]["pixel_values"].shape == (1, 3, 672, 672)
+    model.train()
+    outputs = forward_model(model, batch["inputs"], batch["prompt_ids"])
+    assert outputs.pred_masks.shape[-2:] == (192, 192)
+    loss = PlantSegCriterion()(outputs, batch["targets"])["loss"]
+    assert torch.isfinite(loss)
+    loss.backward()
+    gradient = model.vision_encoder.backbone.layers[1].attention.q_proj.weight.grad
+    assert gradient is not None and torch.isfinite(gradient).all()
+    from src.evaluation import evaluate
+
+    args.eval_mode = "all_classes"
+    args.eval_prompt_batch_size = 2
+    result = evaluate(model, args, "val", torch.device("cpu"), None, tmp_path / "validation")
+    assert result["num_images"] == 3
+    assert result["input_image_size"] == [672, 672]
+    assert np.isfinite(result["miou"])
+
+
 @pytest.mark.parametrize("scope", ["heads", "full"])
 def test_batched_evaluation_matches_original_forward_and_reuses_text(
     tiny_dataset, tiny_model_dir, tmp_path, scope
@@ -145,7 +275,9 @@ def test_batched_evaluation_matches_original_forward_and_reuses_text(
     with torch.inference_mode():
         for category in categories:
             inputs = prepare_inputs(
-                model._plantseg_processor, images=image, text=[category["name"]],
+                model._plantseg_processor,
+                images=image,
+                text=[category["name"]],
                 max_text_length=8,
             )
             output = forward_model(model, inputs, torch.tensor([category["id"]]))
@@ -177,12 +309,14 @@ def test_batched_evaluation_matches_original_forward_and_reuses_text(
             torch.testing.assert_close(
                 torch.cat([o.pred_masks for o in calls]),
                 torch.cat([o.pred_masks for o in expected_outputs]),
-                rtol=1e-4, atol=1e-5,
+                rtol=1e-4,
+                atol=1e-5,
             )
             torch.testing.assert_close(
                 torch.cat([o.pred_logits for o in calls]),
                 torch.cat([o.pred_logits for o in expected_outputs]),
-                rtol=1e-4, atol=1e-5,
+                rtol=1e-4,
+                atol=1e-5,
             )
             count = len(projection_calls)
             predictor(image, categories)
@@ -292,8 +426,8 @@ def test_real_transformers_ddp_checkpointing(tiny_dataset, tiny_model_dir, tmp_p
 
 def test_transformers_adaptation_roundtrip(tiny_dataset, tiny_model_dir, tmp_path):
     from src.runtime import load_adaptation, rng_state
-    from src.training import checkpoint_payload, save_checkpoint
     from src.sam3_adapter import build_optimizer
+    from src.training import checkpoint_payload, save_checkpoint
 
     args = model_args(tiny_dataset, tiny_model_dir, tmp_path)
     model, _ = prepare_model(args, torch.device("cpu"))

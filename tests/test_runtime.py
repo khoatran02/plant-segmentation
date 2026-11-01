@@ -1,10 +1,10 @@
-from argparse import Namespace
 import json
-from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
-import socket
+from argparse import Namespace
+from pathlib import Path
 from types import ModuleType
 
 import numpy as np
@@ -54,12 +54,15 @@ def test_gated_model_fails_before_ddp_or_dataset_work(monkeypatch, tmp_path, tok
     import huggingface_hub
     from huggingface_hub import constants
     from huggingface_hub.errors import GatedRepoError
+
     from src import training
 
     calls = []
     response = httpx.Response(
         401,
-        request=httpx.Request("HEAD", "https://huggingface.co/facebook/sam3/resolve/main/config.json"),
+        request=httpx.Request(
+            "HEAD", "https://huggingface.co/facebook/sam3/resolve/main/config.json"
+        ),
     )
     error = GatedRepoError("Access to model facebook/sam3 is restricted.", response=response)
 
@@ -92,6 +95,7 @@ def test_gated_model_fails_before_ddp_or_dataset_work(monkeypatch, tmp_path, tok
 def test_local_or_offline_model_access_never_uses_network(monkeypatch, tmp_path, mode):
     import huggingface_hub
     from huggingface_hub import constants
+
     from src.sam3_adapter import check_model_access
 
     args = parse_args([])

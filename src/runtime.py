@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import random
 from datetime import timedelta
@@ -133,12 +133,23 @@ def lr_factor(step: int, total: int, warmup: int) -> float:
     return 0.5 * (1 + math.cos(math.pi * progress))
 
 
-def load_adaptation(model, path: Path, expected_args=None):
+def load_adaptation(model, path: Path, expected_args=None, *, allow_resolution_change=False):
     state = torch.load(path, map_location="cpu", weights_only=False)
     if "trainable" not in state:
         raise ValueError(
             f"{path} is not an adaptation checkpoint; use --model_id for pretrained SAM3"
         )
+    if allow_resolution_change and expected_args is not None:
+        raise ValueError("Resolution changes require a new run with --init_from, not --resume")
+    if hasattr(model, "_plantseg_image_size") and not allow_resolution_change:
+        # Before configurable resolution, checkpoints always used the base model size.
+        saved_size = state.get("input_image_size") or model._plantseg_native_image_size
+        if saved_size != model._plantseg_image_size:
+            raise ValueError(
+                f"Checkpoint input resolution is {saved_size}, requested {model._plantseg_image_size}. "
+                f"Use --image_size {saved_size[0]} to resume/evaluate, or --init_from "
+                "with a new --output_dir to train at another resolution."
+            )
     if (
         hasattr(model, "_plantseg_identity")
         and state.get("model_identity") != model._plantseg_identity

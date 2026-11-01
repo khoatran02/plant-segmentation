@@ -1,9 +1,9 @@
 import json
 
 import numpy as np
+import pytest
 from PIL import Image
 from pycocotools import mask as mask_utils
-import pytest
 
 from src.data import build_coco_split, load_metadata, load_pair, split_samples
 

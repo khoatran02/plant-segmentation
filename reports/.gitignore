@@ -1,6 +1,7 @@
 *.aux
 *.log
 *.blg
+*.bbl
 *.out
 *.synctex.gz
 __pycache__/

@@ -2,8 +2,8 @@ import csv
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 import pytest
+from PIL import Image
 
 
 @pytest.fixture
@@ -41,23 +41,24 @@ def tiny_dataset(tmp_path):
 def tiny_model_dir(tmp_path):
     """A real Transformers SAM3 + processor saved locally as safetensors; no HF access."""
     import json
+
+    import torch
     from transformers import (
-        Sam3Config,
-        Sam3Model,
-        Sam3ImageProcessor,
-        Sam3Processor,
         CLIPTextConfig,
         CLIPTokenizer,
+        Sam3Config,
+        Sam3ImageProcessor,
+        Sam3Model,
+        Sam3Processor,
     )
     from transformers.models.sam3.configuration_sam3 import (
+        Sam3DETRDecoderConfig,
+        Sam3DETREncoderConfig,
+        Sam3GeometryEncoderConfig,
+        Sam3MaskDecoderConfig,
         Sam3VisionConfig,
         Sam3ViTConfig,
-        Sam3GeometryEncoderConfig,
-        Sam3DETREncoderConfig,
-        Sam3DETRDecoderConfig,
-        Sam3MaskDecoderConfig,
     )
-    import torch
 
     torch.manual_seed(71)
     config = Sam3Config(

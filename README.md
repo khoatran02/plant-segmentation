@@ -25,7 +25,12 @@ import torchaudio
 from src.sam3_adapter import load_sam3_api
 
 load_sam3_api()
-print("torch / torchvision / torchaudio:", torch.__version__, torchvision.__version__, torchaudio.__version__)
+print(
+    "torch / torchvision / torchaudio:",
+    torch.__version__,
+    torchvision.__version__,
+    torchaudio.__version__,
+)
 print("CUDA:", torch.version.cuda, "GPU count:", torch.cuda.device_count())
 assert torch.cuda.is_available() and torch.cuda.device_count() == 2
 ```
@@ -41,7 +46,7 @@ model = Sam3Model.from_pretrained("facebook/sam3", use_safetensors=True)
 processor = Sam3Processor.from_pretrained("facebook/sam3")
 ```
 
-Luồng train/evaluate không import package `sam3`, không cần checkout `src/sam3`, không dùng `--checkpoint` hoặc biến `SAM3_CHECKPOINT`. Thư mục upstream cũ chỉ là tài liệu tham chiếu của repo. Transformers tự tải config, tokenizer/processor và safetensors vào cache. Pretrained weights vẫn cần được tải ở lần đầu; không cần tự tìm hoặc upload file `sam3.pt`.
+Luồng train/evaluate không import package `sam3`, không dùng submodule hoặc checkpoint `sam3.pt`. Transformers tự tải config, tokenizer/processor và safetensors vào cache. Pretrained weights vẫn cần được tải ở lần đầu.
 
 Model [facebook/sam3](https://huggingface.co/facebook/sam3) yêu cầu tài khoản được cấp quyền truy cập. Sau khi chấp nhận điều kiện và có quyền, thêm Kaggle Secret tên **HF_TOKEN**, bật quyền secret cho notebook, rồi chạy cell Python sau trước `torchrun`:
 
@@ -118,15 +123,17 @@ torchrun --standalone --nnodes=1 --nproc_per_node=2 train.py \
   --dataset_dir /kaggle/input/<dataset>/plantseg \
   --model_id facebook/sam3 --model_revision main \
   --cache_dir /kaggle/working/hf-cache \
-  --output_dir /kaggle/working/plantseg_sam3_transformers_s1105 \
+  --output_dir /kaggle/working/plantseg_sam3_672_s1105 \
   --device cuda --scope heads --annotation_source png --label_policy mask \
+  --image_size 672 \
   --amp fp16 --amp_init_scale 1024 --frozen_dtype fp16 --gradient_checkpointing \
   --batch_size 1 --gradient_accumulation_steps 8 \
   --epochs 20 --warmup_ratio 0.05 --early_stopping_patience 4 \
   --lr 8e-5 --lr_vision 2.5e-5 --lr_language 5e-6 --weight_decay 0.1 \
   --gradient_clip 0.1 --prompts_per_image 1 --pos_prob 0.7 --loss_mask_size 144 \
   --eval_mode all_classes --selection_metric miou \
-  --score_threshold 0.5 --mask_threshold 0.5 --val_every 1 \
+  --score_threshold 0.5 --mask_threshold 0.5 --val_every 3 \
+  --eval_prompt_batch_size 2 \
   --num_workers 2 --log_every_updates 25 --seed 1105
 ```
 
@@ -138,6 +145,19 @@ MODEL_ID=facebook/sam3 \
 bash scripts/train_kaggle_2xt4.sh
 ```
 
+Launcher mặc định **672 × 672**, validation mỗi **3 epoch**, batch prompt đánh giá **2**; epoch cuối luôn validation. Đây là cấu hình giảm tải dựa trên audit dataset, chưa có benchmark chất lượng/tốc độ CUDA để khẳng định tối ưu tuyệt đối. So với 1008, số pixel đầu vào giảm **55,6%**, số token ViT từ **72² xuống 48²**; tỷ lệ này không phải cam kết tăng tốc tương ứng. Có thể đổi bằng `IMAGE_SIZE=784` hoặc `IMAGE_SIZE=1008`; output mặc định chứa kích thước để phân biệt run. Batch prompt có thể hạ về 1 bằng `EVAL_PROMPT_BATCH_SIZE=1` nếu thiếu VRAM. CLI trực tiếp giữ kích thước model gốc khi bỏ `--image_size`; thêm `--image_size 672` như lệnh trên để dùng cấu hình mới.
+
+Nếu đã train ở 1008 và muốn dùng tiếp weights tại 672, dùng **output mới** và `INIT_FROM` (không đặt `RESUME`):
+
+```bash
+DATASET_DIR=/kaggle/input/<dataset>/plantseg \
+INIT_FROM=/kaggle/working/plantseg_sam3_transformers_s1105/last.pt \
+OUTPUT_DIR=/kaggle/working/plantseg_sam3_672_s1105 \
+bash scripts/train_kaggle_2xt4.sh
+```
+
+`INIT_FROM` tương ứng `--init_from`: chỉ nạp adaptation weights; optimizer, GradScaler, epoch, lịch LR, best metric và patience bắt đầu lại. Không dùng đồng thời với `RESUME`/`--resume`. Model gốc/revision, scope và vocabulary vẫn phải khớp. Đổi độ phân giải có thể ảnh hưởng tổn thương nhỏ; cần kiểm tra metric validation của run mới.
+
 Cấu hình khởi đầu dùng batch **1 ảnh/GPU**, accumulation 8, effective batch **16 ảnh/update**. T4 dùng FP16. `heads` đóng băng ViT backbone và CLIP text encoder, vẫn train vision neck, text projection, fusion/decoder và segmentation heads. CLIP hidden states của 115 tên bệnh được cache rồi bỏ text encoder khỏi model đang chạy; text projection vẫn nhận gradient. `full` train toàn model, cần đo lại bộ nhớ và điều chỉnh cấu hình. Chưa có số đo xác nhận cấu hình SAM3 này vừa 16 GB T4; phải chạy smoke test dưới đây trước. DDP chia model thành hai bản, mỗi GPU vẫn phải đủ bộ nhớ cho một bản và activation của nó.
 
 ```bash
@@ -148,6 +168,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node=2 train.py \
   --model_id facebook/sam3 --model_revision main \
   --cache_dir /kaggle/working/hf-cache \
   --output_dir /kaggle/working/plantseg_smoke \
+  --image_size 672 \
   --epochs 1 --limit_train 16 --limit_val 4 --eval_mode oracle \
   --batch_size 1 --gradient_accumulation_steps 2 --num_workers 0 --amp fp16
 ```
@@ -160,12 +181,13 @@ Có thể đặt `EVAL_MODE=oracle` cho launcher trong giai đoạn phát triể
 
 ### Giảm thời gian train + validation trên 2 × T4
 
-Validation `all_classes` thử 115 prompt/ảnh. Evaluator cache text embeddings trong mỗi lần đánh giá (tạo lại sau mỗi epoch có validation để dùng text projection/CLIP mới nhất), và hỗ trợ gộp prompt bằng `--eval_prompt_batch_size`. Image backbone vẫn chạy một lần/ảnh; mask vẫn được nội suy về kích thước ảnh gốc, giữ đủ các lớp và quy tắc ghép nhãn. Mặc định batch prompt là 1 để giữ nhu cầu VRAM thấp. Có thể thử 2 rồi 4 trên T4; batch lớn tăng bộ nhớ và không bảo đảm tăng tốc tuyến tính. Sai số số thực giữa các batch có thể làm thay đổi pixel sát threshold hoặc sát điểm hòa.
+Validation `all_classes` thử 115 prompt/ảnh. Evaluator cache text embeddings trong mỗi lần đánh giá (tạo lại sau mỗi epoch có validation để dùng text projection/CLIP mới nhất), và hỗ trợ gộp prompt bằng `--eval_prompt_batch_size`. Image backbone vẫn chạy một lần/ảnh; mask vẫn được nội suy về kích thước ảnh gốc, giữ đủ các lớp và quy tắc ghép nhãn. CLI mặc định batch prompt là 1; launcher 672 dùng 2. Có thể thử 4 trên T4; batch lớn tăng bộ nhớ và không bảo đảm tăng tốc tuyến tính. Sai số số thực giữa các batch có thể làm thay đổi pixel sát threshold hoặc sát điểm hòa.
 
 Ưu tiên giảm tần suất validation bằng `--val_every 3`; epoch cuối luôn được đánh giá. Ví dụ tiếp tục **run đã lưu checkpoint** với cùng dataset, output và cấu hình train ban đầu:
 
 ```bash
 DATASET_DIR=/kaggle/input/<dataset>/plantseg \
+IMAGE_SIZE=1008 \
 OUTPUT_DIR=/kaggle/working/plantseg_sam3_transformers_s1105 \
 RESUME=/kaggle/working/plantseg_sam3_transformers_s1105/last.pt \
 bash scripts/train_kaggle_2xt4.sh \
@@ -194,13 +216,15 @@ Transformers `Sam3Model` trả về prediction tensors, chưa cung cấp loss tr
 
 Loss được lấy trung bình theo cặp ảnh/prompt, tính bằng FP32 dưới AMP. Loss này giám sát output cuối; **khác recipe auxiliary/one-to-many của backend SAM3 upstream trước đó**, nên phải ghi lại backend/loss khi so sánh thí nghiệm. Không tuyên bố hai backend có cùng objective hoặc tái lập nguyên xi số trong paper.
 
-Image preprocessing dùng `Sam3Processor` của đúng model revision (model gốc resize vuông 1008 và normalize mean/std 0.5), thêm horizontal flip khi train. `--loss_mask_size 144` chỉ giảm kích thước mask dùng cho matching/loss; giữ instance target và semantic target bằng area resampling. Evaluation vẫn nội suy logits về kích thước PNG gốc trước threshold, không dùng mask resolution của loss để tính metric. Tăng số prompt sẽ tăng số cặp ảnh/prompt thực sự đưa qua model và tăng nhu cầu bộ nhớ.
+Image preprocessing dùng `Sam3Processor` của đúng model revision (model gốc resize vuông 1008 và normalize mean/std 0.5), thêm horizontal flip khi train. `--image_size 672` cập nhật đồng bộ processor, target size, model config, global RoPE grids và FPN metadata trước khi load model; không thay `pretrain_image_size` hoặc kích thước learned positional weights của checkpoint. Với facebook/sam3, kích thước tùy chỉnh phải là bội số dương của 28 để grid ViT chia hết cho nhánh FPN giảm mẫu 2 lần. Không sửa ảnh/PNG gốc. `--loss_mask_size 144` chỉ giảm kích thước mask dùng cho matching/loss; giữ instance target và semantic target bằng area resampling. Evaluation dùng cùng `--image_size` với checkpoint và vẫn nội suy logits về kích thước PNG gốc trước threshold, không dùng mask resolution của loss để tính metric. Tăng số prompt sẽ tăng số cặp ảnh/prompt thực sự đưa qua model và tăng nhu cầu bộ nhớ.
 
 `Sam3Model` ở phiên bản pin chưa expose `gradient_checkpointing_enable` trên model ngoài. Project dùng `torch.utils.checkpoint` nonreentrant cho các block vision/DETR và mask decoder; đã kiểm thử backward và DDP trên cấu hình nhỏ.
 
 ## Resume và đầu ra
 
 Thêm `--resume /kaggle/input/<saved-run>/last.pt` vào **cùng lệnh train ban đầu**, giữ nguyên số epoch tổng. Ví dụ đang dừng ở epoch 6 của kế hoạch 20 thì vẫn dùng `--epochs 20`. Launcher hỗ trợ biến `RESUME=/path/last.pt`.
+
+Resume/evaluate phải dùng đúng kích thước đầu vào của checkpoint. Checkpoint mới ghi `input_image_size`; checkpoint cũ chưa có trường này được hiểu là kích thước model gốc (1008 với facebook/sam3). Với launcher mới, resume run cũ cần `IMAGE_SIZE=1008` và output cũ; không thể dùng `--resume_allow_val_schedule_change` để đổi độ phân giải. Chuyển 1008 → 672 dùng `--init_from` và output mới như ví dụ trên.
 
 Checkpoint là adaptation gồm trainable parameters, optimizer, GradScaler, epoch/update, best metric, patience và RNG từng rank/DataLoader. Cần cùng scope, world size, model/revision/Transformers version, dataset/fingerprint và cấu hình tối ưu ban đầu. Khôi phục ở ranh giới epoch; không bảo đảm bitwise deterministic cho kernel CUDA. Checkpoint mới có **format 3**. Checkpoint format 2 của backend SAM3 upstream không tương thích với tham số/loss Transformers; không resume trực tiếp.
 
@@ -230,7 +254,8 @@ torchrun --standalone --nnodes=1 --nproc_per_node=2 evaluate.py \
   --dataset_dir /kaggle/input/<dataset>/plantseg --split test \
   --model_id facebook/sam3 --model_revision main \
   --cache_dir /kaggle/working/hf-cache \
-  --resume /kaggle/working/plantseg_sam3_transformers_s1105/best.pt \
+  --resume /kaggle/working/plantseg_sam3_672_s1105/best.pt \
+  --image_size 672 --eval_prompt_batch_size 2 \
   --scope heads --eval_mode all_classes --label_policy mask --amp fp16 \
   --output_dir /kaggle/working/plantseg_sam3_test
 
@@ -269,13 +294,37 @@ Tất cả giá trị ở thang **0–1**, nhân 100 khi lập bảng phần tr�
 
 Cùng công thức metric chưa đủ tái lập Table 3: phải thống nhất phiên bản/split, chính sách nhãn, background/absent classes, input preprocessing, quy trình chọn checkpoint và việc model có được nhận nhãn bệnh thật không. Pipeline SAM3 dùng AdamW và loss `transformers-hungarian-v1`; paper mô tả SGD/CE, LR 0.001, momentum 0.9, weight decay 0.0005, batch 16 cho baseline. Đây là protocol fine-tune SAM3 để đối chiếu, không phải tái lập nguyên xi training baseline trong paper.
 
+## Cấu trúc source
+
+```text
+train.py / evaluate.py       Entry point train và đánh giá
+src/
+  data.py                   Metadata, RGB/PNG, cache pseudo-instance
+  sam3_data.py              Dataset, sampling prompt và collator
+  sam3_adapter.py           Load SAM3 Transformers, scope và độ phân giải
+  losses.py                 Hungarian matching và loss
+  training.py               Vòng train, DDP, optimizer và checkpoint
+  evaluation.py             Suy luận và đánh giá ở kích thước ảnh gốc
+  metrics.py                Confusion matrix, IoU, Dice và accuracy
+  runtime.py                DDP, RNG và khôi phục checkpoint
+scripts/                    Cài dependencies và launcher Kaggle
+tests/                      Unit/integration tests và helper DDP
+docs/                       Audit dataset và ghi nhận kiểm thử
+reports/                    Bản thảo LaTeX và bằng chứng lịch sử
+```
+
+`datasets/`, `outputs/` và `.venv/` là dữ liệu, kết quả và môi trường local, không thuộc source được quản lý bằng Git. Bản thảo trong `reports/` mô tả pipeline cũ, không phải cấu hình huấn luyện hiện tại.
+
 ## Kiểm thử
 
 ```bash
 python -m pip install -r requirements.txt
 python -m pytest -q
 ruff check src tests train.py evaluate.py
+ruff format --check src tests train.py evaluate.py
 ```
+
+Để format code và sắp xếp import khi chỉnh sửa: `ruff check --select I --fix src tests train.py evaluate.py`, sau đó `ruff format src tests train.py evaluate.py`.
 
 Tests load một SAM3 nhỏ bằng `from_pretrained` từ safetensors local, chạy loss/backward, text cache/projection gradient, inference và DDP checkpointing bằng model thật của Transformers. Đồng thời kiểm tra confusion/macro metrics, nhãn vắng, mask trống, nội suy logits, PNG→RLE không mất pixel, gộp >200 components, cache invalidation, EXIF, RNG/checkpoint, CLI và DDP Gloo hai process. Test DDP đối chiếu gradient accumulation với batch tham chiếu, đồng thời xác nhận evaluation không nhân đôi ảnh khi split không chia hết cho world size. Test này chạy CPU, không thay thế smoke test SAM3/NCCL trên Kaggle.
 

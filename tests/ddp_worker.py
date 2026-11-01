@@ -1,9 +1,9 @@
 """Real two-process Gloo smoke test; no CUDA/SAM3 weights required."""
 
+import sys
 from argparse import Namespace
 from contextlib import nullcontext
 from pathlib import Path
-import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

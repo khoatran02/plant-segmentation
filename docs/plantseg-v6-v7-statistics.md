@@ -270,7 +270,7 @@ When the polygons are rasterised and compared with the PNG mask, they agree for 
 
 The PNG masks are correct in these cases: checked by eye on the examples above, the mask sits on the lesions and the polygons do not. In v7 this affects 3.0% of the training images, and for 19 of them the donor image no longer exists in v7. Another 261 v7 images (387 in v6) have a polygon-to-mask IoU between 0.5 and 0.9, which is a partial disagreement and not this bug.
 
-This matters most for anything trained on boxes or instance polygons, including the SAM 3 fine-tuning described in [`sam3-guide.md`](sam3-guide.md). Either drop the flagged images or rebuild the instances from the PNG masks.
+This matters most for anything trained on boxes or instance polygons. The [current SAM3 pipeline](../README.md) rebuilds pseudo-instances from PNG masks by default; the earlier Hydra training guide has been removed.
 
 ### 5.3 Duplicate images leak across splits
 
