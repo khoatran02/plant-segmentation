@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import time
 from pathlib import Path
 
 import numpy as np
@@ -52,54 +53,89 @@ def class_evidence(masks, scores, shape, mask_threshold=0.5, chunk_size=8):
 
 
 class Sam3SemanticPredictor:
-    def __init__(self, model, device, dtype, score_threshold, mask_threshold):
+    def __init__(self, model, device, dtype, score_threshold, mask_threshold, prompt_batch_size=1):
+        if prompt_batch_size < 1:
+            raise ValueError("prompt_batch_size must be positive")
         self.model, self.device, self.dtype = model, device, dtype
         self.score_threshold, self.mask_threshold = score_threshold, mask_threshold
         self.processor = model._plantseg_processor
+        self.prompt_batch_size = prompt_batch_size
+        # A predictor belongs to one evaluation: projections must refresh after training.
+        self.text_batches = {}
+
+    def _text_inputs(self, categories):
+        from transformers.modeling_outputs import BaseModelOutputWithPooling
+        from src.sam3_adapter import prepare_inputs
+
+        key = tuple((c["id"], c["name"]) for c in categories)
+        if key not in self.text_batches:
+            if hasattr(self.model, "_plantseg_text_hidden"):
+                ids = torch.tensor([c["id"] for c in categories], device=self.device)
+                features = self.model.text_projection(self.model._plantseg_text_hidden[ids])
+                attention_mask = self.model._plantseg_text_mask[ids]
+            else:
+                text = prepare_inputs(
+                    self.processor,
+                    text=[c["name"] for c in categories],
+                    max_text_length=self.model.config.text_config.max_position_embeddings,
+                )
+                text = {k: v.to(self.device) for k, v in text.items()}
+                features = self.model.get_text_features(**text).pooler_output
+                attention_mask = text["attention_mask"]
+            self.text_batches[key] = {
+                "text_embeds": BaseModelOutputWithPooling(pooler_output=features),
+                "attention_mask": attention_mask,
+            }
+        return self.text_batches[key]
+
+    @staticmethod
+    def _expand_vision(vision, count):
+        from transformers.models.sam3.modeling_sam3 import Sam3VisionEncoderOutput
+
+        # Broadcast the single image's features; never run the backbone per prompt.
+        return Sam3VisionEncoderOutput(
+            fpn_hidden_states=tuple(t.expand(count, *t.shape[1:]) for t in vision.fpn_hidden_states),
+            fpn_position_encoding=tuple(
+                t.expand(count, *t.shape[1:]) for t in vision.fpn_position_encoding
+            ),
+        )
 
     @torch.inference_mode()
     def __call__(self, image, categories):
         with torch.autocast(self.device.type, dtype=self.dtype, enabled=self.dtype is not None):
-            from src.sam3_adapter import forward_model, prepare_inputs
-
             image_inputs = self.processor(images=image, return_tensors="pt")
             vision = self.model.get_vision_features(
                 pixel_values=image_inputs.pixel_values.to(self.device)
             )
             best = torch.zeros((image.height, image.width), device=self.device)
             prediction = torch.zeros(best.shape, dtype=torch.int64, device=self.device)
-            for category in categories:
-                text = prepare_inputs(
-                    self.processor,
-                    text=[category["name"]],
-                    max_text_length=self.model.config.text_config.max_position_embeddings,
-                )
-                inputs = {
-                    "vision_embeds": vision,
-                    "input_ids": text["input_ids"].to(self.device),
-                    "attention_mask": text["attention_mask"].to(self.device),
-                }
-                output = forward_model(
-                    self.model, inputs, torch.tensor([category["id"]], device=self.device)
+            for start in range(0, len(categories), self.prompt_batch_size):
+                selected = categories[start : start + self.prompt_batch_size]
+                output = self.model(
+                    vision_embeds=self._expand_vision(vision, len(selected)),
+                    **self._text_inputs(selected),
                 )
                 scores = (
                     output.pred_logits.float().sigmoid() * output.presence_logits.float().sigmoid()
-                )[0]
-                keep = scores > self.score_threshold
-                evidence = class_evidence(
-                    output.pred_masks[0][keep],
-                    scores[keep],
-                    best.shape,
-                    self.mask_threshold,
                 )
-                replace = evidence > best  # ties retain the lowest class ID
-                prediction[replace] = category["id"] + 1
-                best = torch.maximum(best, evidence)
+                for index, category in enumerate(selected):
+                    keep = scores[index] > self.score_threshold
+                    evidence = class_evidence(
+                        output.pred_masks[index][keep],
+                        scores[index][keep],
+                        best.shape,
+                        self.mask_threshold,
+                    )
+                    replace = evidence > best  # ties retain the first class in input order
+                    prediction = torch.where(replace, category["id"] + 1, prediction)
+                    best = torch.maximum(best, evidence)
+                del output
         return prediction.cpu().numpy().astype(np.uint8)
 
 
 def evaluate(model, args, split, device, dtype, output_prefix=None):
     """No padded sampler and no DDP forward: every eval image is counted exactly once."""
+    started = time.monotonic()
     metadata = load_metadata(args.dataset_dir)
     categories = categories_from_metadata(metadata)
     samples = split_samples(args.dataset_dir, split, metadata)
@@ -113,7 +149,8 @@ def evaluate(model, args, split, device, dtype, output_prefix=None):
     if model is not None:
         model.eval()
         predictor = Sam3SemanticPredictor(
-            model, device, dtype, args.score_threshold, args.mask_threshold
+            model, device, dtype, args.score_threshold, args.mask_threshold,
+            getattr(args, "eval_prompt_batch_size", 1),
         )
     prediction_dir = getattr(args, "prediction_dir", None)
     save_dir = getattr(args, "save_predictions", None)
@@ -170,6 +207,8 @@ def evaluate(model, args, split, device, dtype, output_prefix=None):
             "mask_threshold": args.mask_threshold,
             "limited": limit is not None,
             "world_size": world_size(),
+            "eval_prompt_batch_size": getattr(args, "eval_prompt_batch_size", 1),
+            "evaluation_seconds": time.monotonic() - started,
         }
     )
     if output_prefix is not None and rank() == 0:
@@ -221,7 +260,10 @@ def main():
     parser.add_argument("--amp", choices=("auto", "fp16", "bf16", "off"), default="fp16")
     parser.add_argument("--limit_val", type=int)
     parser.add_argument("--limit_test", type=int)
+    parser.add_argument("--eval_prompt_batch_size", type=int, default=1)
     args = parser.parse_args()
+    if args.eval_prompt_batch_size < 1:
+        parser.error("--eval_prompt_batch_size must be positive")
     if not 0 <= args.score_threshold <= 1 or not 0 <= args.mask_threshold <= 1:
         parser.error("thresholds must be in [0, 1]")
     if any(v is not None and v < 1 for v in (args.limit_val, args.limit_test)):

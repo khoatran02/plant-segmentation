@@ -158,6 +158,27 @@ Train dùng AdamW, warmup tuyến tính + cosine decay theo optimizer update th�
 
 Có thể đặt `EVAL_MODE=oracle` cho launcher trong giai đoạn phát triển; vẫn phải chọn threshold trên validation và chạy đánh giá `all_classes` sau cùng nếu so sánh baseline. Mọi tham số/tên metric của ví dụ SciVQA như BLEU/ROUGE, Qwen, OT, xLSTM không áp dụng cho segmentation.
 
+### Giảm thời gian train + validation trên 2 × T4
+
+Validation `all_classes` thử 115 prompt/ảnh. Evaluator cache text embeddings trong mỗi lần đánh giá (tạo lại sau mỗi epoch có validation để dùng text projection/CLIP mới nhất), và hỗ trợ gộp prompt bằng `--eval_prompt_batch_size`. Image backbone vẫn chạy một lần/ảnh; mask vẫn được nội suy về kích thước ảnh gốc, giữ đủ các lớp và quy tắc ghép nhãn. Mặc định batch prompt là 1 để giữ nhu cầu VRAM thấp. Có thể thử 2 rồi 4 trên T4; batch lớn tăng bộ nhớ và không bảo đảm tăng tốc tuyến tính. Sai số số thực giữa các batch có thể làm thay đổi pixel sát threshold hoặc sát điểm hòa.
+
+Ưu tiên giảm tần suất validation bằng `--val_every 3`; epoch cuối luôn được đánh giá. Ví dụ tiếp tục **run đã lưu checkpoint** với cùng dataset, output và cấu hình train ban đầu:
+
+```bash
+DATASET_DIR=/kaggle/input/<dataset>/plantseg \
+OUTPUT_DIR=/kaggle/working/plantseg_sam3_transformers_s1105 \
+RESUME=/kaggle/working/plantseg_sam3_transformers_s1105/last.pt \
+bash scripts/train_kaggle_2xt4.sh \
+  --val_every 3 --resume_allow_val_schedule_change \
+  --eval_prompt_batch_size 2
+```
+
+`--resume_allow_val_schedule_change` chỉ cho phép đổi `val_every`: giữ optimizer, GradScaler, step/lịch LR và best metric, đặt lại bộ đếm early stopping. Lịch validation thay đổi nên kết quả chọn best checkpoint/early stopping có thể khác run cũ. Không dùng cờ này để đổi `eval_mode`, `limit_val`, batch train hoặc hyperparameter. `eval_prompt_batch_size` có thể đổi khi resume vì chỉ thay cách chia batch inference. Với run mới, bỏ `RESUME` và cờ cho phép đổi lịch. Launcher cũng nhận `VAL_EVERY` và `EVAL_PROMPT_BATCH_SIZE`.
+
+Theo log 42 phút train + 68 phút val, kế hoạch 20 epoch đổi từ val mỗi epoch sang mỗi 3 epoch giảm số lần val từ 20 xuống 7, tiết kiệm khoảng 14 giờ 44 phút, chưa tính hiệu quả batching. Đây là ước tính khi chạy đủ 20 epoch và tốc độ giữ nguyên; không phải benchmark GPU của code mới. Validation thưa hơn giảm số checkpoint được so sánh và kéo dài số epoch trước khi early stopping đủ số lần không cải thiện.
+
+Đo trên checkpoint trước khi chọn batch prompt cho run dài: chạy evaluation cùng một tập ảnh với batch 1, 2, 4 trong các output riêng, giữ nguyên `eval_mode`, threshold và `limit_val`. JSON đánh giá ghi `evaluation_seconds` và `eval_prompt_batch_size`; kiểm tra cả metric và VRAM. Log epoch in riêng `train`, `val`, `save`; `log.jsonl` giữ `seconds` cho train, thêm `val_evaluation_seconds`, `checkpoint_seconds`, `epoch_seconds` (`val_evaluation_seconds` chỉ có ở epoch được validation).
+
 ## Loss và preprocessing của backend Transformers
 
 Transformers `Sam3Model` trả về prediction tensors, chưa cung cấp loss training cho API này. `src/losses.py` triển khai objective `transformers-hungarian-v1` với Hungarian matching theo confidence, L1/GIoU box và BCE/Dice mask. Loss cuối gồm:

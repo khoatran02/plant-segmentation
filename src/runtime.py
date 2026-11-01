@@ -192,6 +192,10 @@ def load_adaptation(model, path: Path, expected_args=None):
             "early_stopping_patience",
         ):
             if key in saved and saved[key] != getattr(expected_args, key):
+                if key == "val_every" and getattr(
+                    expected_args, "resume_allow_val_schedule_change", False
+                ):
+                    continue
                 raise ValueError(
                     f"Resume mismatch for {key}: checkpoint={saved[key]}, requested={getattr(expected_args, key)}"
                 )

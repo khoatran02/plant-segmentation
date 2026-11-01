@@ -142,6 +142,8 @@ def test_cli_aliases():
     )
     with pytest.raises(SystemExit):
         parse_args(["--batch_size", "0"])
+    with pytest.raises(SystemExit):
+        parse_args(["--eval_prompt_batch_size", "0"])
 
 
 def test_rng_and_loader_generator_roundtrip():
@@ -164,6 +166,32 @@ def test_checkpoint_parameter_mismatch_fails(tmp_path):
     torch.save({"trainable": {"wrong": torch.zeros(1)}}, path)
     with pytest.raises(ValueError, match="parameter set"):
         load_adaptation(model, path)
+
+
+def test_resume_can_opt_in_to_validation_schedule_change_only(tmp_path):
+    from src.training import checkpoint_payload
+
+    model = torch.nn.Linear(2, 1)
+    model._plantseg_identity = {"base": "same"}
+    args = parse_args([])
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    state = checkpoint_payload(model, optimizer, scaler, args, 3, 100, 0.4, 2, [rng_state()], {})
+    path = tmp_path / "last.pt"
+    torch.save(state, path)
+    args.val_every = 3
+    with pytest.raises(ValueError, match="Resume mismatch for val_every"):
+        load_adaptation(model, path, args)
+    args.resume_allow_val_schedule_change = True
+    args.eval_prompt_batch_size = 4
+    restored = load_adaptation(model, path, args)
+    assert (restored["epoch"], restored["step"], restored["best_metric"]) == (3, 100, 0.4)
+    for key, value in (("eval_mode", "all_classes"), ("limit_val", 10), ("batch_size", 2)):
+        previous = getattr(args, key)
+        setattr(args, key, value)
+        with pytest.raises(ValueError, match=f"Resume mismatch for {key}"):
+            load_adaptation(model, path, args)
+        setattr(args, key, previous)
 
 
 def test_external_predictions_end_to_end(tiny_dataset, tmp_path):

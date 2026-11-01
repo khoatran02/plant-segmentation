@@ -39,6 +39,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node=2 train.py \
   --lr 8e-5 --lr_vision 2.5e-5 --lr_language 5e-6 --weight_decay 0.1 \
   --gradient_clip 0.1 --prompts_per_image 1 --pos_prob 0.7 --loss_mask_size 144 \
   --eval_mode "${EVAL_MODE:-all_classes}" --selection_metric miou \
-  --score_threshold 0.5 --mask_threshold 0.5 --val_every 1 \
+  --score_threshold 0.5 --mask_threshold 0.5 --val_every "${VAL_EVERY:-1}" \
+  --eval_prompt_batch_size "${EVAL_PROMPT_BATCH_SIZE:-1}" \
   --num_workers 2 --log_every_updates 25 --seed 1105 \
   "${OPTIONS[@]}" "$@"

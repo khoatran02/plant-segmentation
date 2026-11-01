@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 import numpy as np
+import pytest
 import torch
 
 from src.data import categories_from_metadata, load_metadata
@@ -125,6 +126,82 @@ def test_cached_text_matches_uncached_and_projection_receives_grad(
     torch.testing.assert_close(before, after)
     after.sum().backward()
     assert model.text_projection.weight.grad is not None
+
+
+@pytest.mark.parametrize("scope", ["heads", "full"])
+def test_batched_evaluation_matches_original_forward_and_reuses_text(
+    tiny_dataset, tiny_model_dir, tmp_path, scope
+):
+    from src.evaluation import class_evidence
+
+    args = model_args(tiny_dataset, tiny_model_dir, tmp_path, scope)
+    model, _ = prepare_model(args, torch.device("cpu"))
+    model.eval()
+    image = PlantSegDataset(args)[0]["image"]
+    categories = categories_from_metadata(load_metadata(tiny_dataset))
+    expected_outputs = []
+    expected = torch.zeros((image.height, image.width), dtype=torch.int64)
+    best = torch.zeros_like(expected, dtype=torch.float32)
+    with torch.inference_mode():
+        for category in categories:
+            inputs = prepare_inputs(
+                model._plantseg_processor, images=image, text=[category["name"]],
+                max_text_length=8,
+            )
+            output = forward_model(model, inputs, torch.tensor([category["id"]]))
+            expected_outputs.append(output)
+            scores = (output.pred_logits.sigmoid() * output.presence_logits.sigmoid())[0]
+            evidence = class_evidence(output.pred_masks[0], scores, best.shape)
+            expected[evidence > best] = category["id"] + 1
+            best = torch.maximum(best, evidence)
+    calls = []
+    vision_calls = []
+    projection_calls = []
+    handles = [
+        model.register_forward_hook(lambda m, a, o: calls.append(o)),
+        model.vision_encoder.register_forward_hook(lambda m, a, o: vision_calls.append(1)),
+        model.text_projection.register_forward_hook(lambda m, a, o: projection_calls.append(1)),
+    ]
+    # Same text forces exact class ties; input order must survive chunk boundaries.
+    tied = [{**c, "name": categories[0]["name"]} for c in categories]
+    try:
+        for batch_size in (1, 2, 3):
+            calls.clear()
+            vision_calls.clear()
+            projection_calls.clear()
+            predictor = Sam3SemanticPredictor(
+                model, torch.device("cpu"), None, 0.0, 0.5, batch_size
+            )
+            actual = predictor(image, categories)
+            np.testing.assert_array_equal(actual, expected.numpy())
+            torch.testing.assert_close(
+                torch.cat([o.pred_masks for o in calls]),
+                torch.cat([o.pred_masks for o in expected_outputs]),
+                rtol=1e-4, atol=1e-5,
+            )
+            torch.testing.assert_close(
+                torch.cat([o.pred_logits for o in calls]),
+                torch.cat([o.pred_logits for o in expected_outputs]),
+                rtol=1e-4, atol=1e-5,
+            )
+            count = len(projection_calls)
+            predictor(image, categories)
+            assert len(projection_calls) == count  # no tokenization/CLIP/projection per image
+            assert len(vision_calls) == 2  # backbone once per image, independent of prompt count
+        if scope == "heads":
+            model._plantseg_text_hidden[1].copy_(model._plantseg_text_hidden[0])
+            model._plantseg_text_mask[1].copy_(model._plantseg_text_mask[0])
+        for batch_size in (1, 2):
+            predictor = Sam3SemanticPredictor(
+                model, torch.device("cpu"), None, 0.0, 0.0, batch_size
+            )
+            prediction = predictor(image, tied)
+            assert set(np.unique(prediction)) == {1}
+        predictor = Sam3SemanticPredictor(model, torch.device("cpu"), None, 1.0, 0.5, 2)
+        assert not predictor(image, categories).any()
+    finally:
+        for handle in handles:
+            handle.remove()
 
 
 def test_processor_batches_positive_and_negative_targets(tiny_dataset, tiny_model_dir, tmp_path):

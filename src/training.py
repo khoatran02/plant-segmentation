@@ -247,6 +247,22 @@ def train(args, device):
         scaler.load_state_dict(state["scaler"])
         start, step = state["epoch"] + 1, state["step"]
         best, bad_epochs = state.get("best_metric", -1.0), state.get("bad_epochs", 0)
+        previous_val_every = state.get("config", {}).get("val_every", args.val_every)
+        if previous_val_every != args.val_every:
+            # Scores remain comparable; patience restarts under the new observation schedule.
+            bad_epochs = 0
+            config["resume_validation_schedule"] = {
+                "checkpoint": str(args.resume),
+                "previous_val_every": previous_val_every,
+                "val_every": args.val_every,
+                "patience_reset": True,
+            }
+            if rank() == 0:
+                print(
+                    f"[resume] val_every {previous_val_every} -> {args.val_every}; "
+                    "optimizer, scheduler and best metric restored; patience reset.",
+                    flush=True,
+                )
         restore_rng(state["rng_states"][rank()], generator)
     elif (args.output_dir / "last.pt").exists():
         raise ValueError("Output contains last.pt; use --resume or a new --output_dir")
@@ -349,10 +365,10 @@ def train(args, device):
                 best, bad_epochs = selected, 0
             else:
                 bad_epochs += 1
-        log(record)
         # Every rank participates once; only rank 0 writes checkpoints/logs.
         rng_states = gather_objects(rng_state(generator))
         if rank() == 0:
+            checkpoint_started = time.monotonic()
             state = checkpoint_payload(
                 model,
                 optimizer,
@@ -369,8 +385,14 @@ def train(args, device):
             if improved:
                 save_checkpoint(args.output_dir / "best.pt", state)
                 write_json(args.output_dir / "best-metrics.json", metrics)
+            record["checkpoint_seconds"] = time.monotonic() - checkpoint_started
+            record["epoch_seconds"] = time.monotonic() - started
+            log(record)
             print(
-                f"[epoch {epoch + 1}] loss={record['train_loss']:.4f}, step={step}, best {args.selection_metric}={best:.5f}",
+                f"[epoch {epoch + 1}] loss={record['train_loss']:.4f}, step={step}, "
+                f"best {args.selection_metric}={best:.5f}, train={record['seconds']:.1f}s, "
+                f"val={record.get('val_evaluation_seconds', 0):.1f}s, "
+                f"save={record['checkpoint_seconds']:.1f}s",
                 flush=True,
             )
         barrier()
@@ -412,6 +434,10 @@ def parse_args(argv=None):
     add_model_arguments(parser)
     parser.add_argument("--no_pretrained", action="store_true")
     parser.add_argument("--resume", type=Path)
+    parser.add_argument(
+        "--resume_allow_val_schedule_change", action="store_true",
+        help="Allow changing only val_every on resume; retain best metric, reset patience",
+    )
     parser.add_argument("--scope", choices=("heads", "full"), default="heads")
     parser.add_argument("--frozen_dtype", choices=("auto", "fp16", "fp32"), default="auto")
     parser.add_argument("--amp", choices=("auto", "fp16", "bf16", "off"), default="fp16")
@@ -444,6 +470,10 @@ def parse_args(argv=None):
     )
     parser.add_argument("--min_delta", type=float, default=0.0)
     parser.add_argument("--val_every", type=int, default=1)
+    parser.add_argument(
+        "--eval_prompt_batch_size", type=int, default=1,
+        help="Prompts per inference batch sharing one image; increase after checking GPU memory",
+    )
     parser.add_argument("--eval_mode", choices=("oracle", "all_classes"), default="oracle")
     parser.add_argument("--score_threshold", type=float, default=0.5)
     parser.add_argument("--mask_threshold", type=float, default=0.5)
@@ -465,6 +495,7 @@ def parse_args(argv=None):
         "log_every",
         "prompts_per_image",
         "loss_mask_size",
+        "eval_prompt_batch_size",
     ):
         if getattr(args, name) < 1:
             parser.error(f"--{name} must be positive")
