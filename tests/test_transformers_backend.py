@@ -259,8 +259,9 @@ def test_672_input_with_production_patch_window_and_global_attention(
 
 
 @pytest.mark.parametrize("scope", ["heads", "full"])
+@pytest.mark.parametrize("mask_source", ["instance", "semantic"])
 def test_batched_evaluation_matches_original_forward_and_reuses_text(
-    tiny_dataset, tiny_model_dir, tmp_path, scope
+    tiny_dataset, tiny_model_dir, tmp_path, scope, mask_source
 ):
     from src.evaluation import class_evidence
 
@@ -282,8 +283,13 @@ def test_batched_evaluation_matches_original_forward_and_reuses_text(
             )
             output = forward_model(model, inputs, torch.tensor([category["id"]]))
             expected_outputs.append(output)
-            scores = (output.pred_logits.sigmoid() * output.presence_logits.sigmoid())[0]
-            evidence = class_evidence(output.pred_masks[0], scores, best.shape)
+            if mask_source == "semantic":
+                scores = output.presence_logits[0].sigmoid().reshape(1)
+                masks = output.semantic_seg[0]
+            else:
+                scores = (output.pred_logits.sigmoid() * output.presence_logits.sigmoid())[0]
+                masks = output.pred_masks[0]
+            evidence = class_evidence(masks, scores, best.shape)
             expected[evidence > best] = category["id"] + 1
             best = torch.maximum(best, evidence)
     calls = []
@@ -302,7 +308,7 @@ def test_batched_evaluation_matches_original_forward_and_reuses_text(
             vision_calls.clear()
             projection_calls.clear()
             predictor = Sam3SemanticPredictor(
-                model, torch.device("cpu"), None, 0.0, 0.5, batch_size
+                model, torch.device("cpu"), None, 0.0, 0.5, batch_size, mask_source
             )
             actual = predictor(image, categories)
             np.testing.assert_array_equal(actual, expected.numpy())
@@ -327,15 +333,185 @@ def test_batched_evaluation_matches_original_forward_and_reuses_text(
             model._plantseg_text_mask[1].copy_(model._plantseg_text_mask[0])
         for batch_size in (1, 2):
             predictor = Sam3SemanticPredictor(
-                model, torch.device("cpu"), None, 0.0, 0.0, batch_size
+                model, torch.device("cpu"), None, 0.0, 0.0, batch_size, mask_source
             )
             prediction = predictor(image, tied)
             assert set(np.unique(prediction)) == {1}
-        predictor = Sam3SemanticPredictor(model, torch.device("cpu"), None, 1.0, 0.5, 2)
+        predictor = Sam3SemanticPredictor(
+            model, torch.device("cpu"), None, 1.0, 0.5, 2, mask_source
+        )
         assert not predictor(image, categories).any()
     finally:
         for handle in handles:
             handle.remove()
+
+
+def test_semantic_inference_does_not_require_instance_query_confidence(
+    tiny_dataset, tiny_model_dir, tmp_path
+):
+    args = model_args(tiny_dataset, tiny_model_dir, tmp_path)
+    model, _ = prepare_model(args, torch.device("cpu"))
+    model.eval()
+    image = PlantSegDataset(args)[0]["image"]
+    categories = categories_from_metadata(load_metadata(tiny_dataset))[:1]
+
+    def confident_union_with_no_confident_query(module, inputs, output):
+        output.pred_logits.fill_(-100)
+        output.presence_logits.fill_(10)
+        output.semantic_seg.fill_(-10)
+        output.semantic_seg[..., :4, :4] = 10
+
+    handle = model.register_forward_hook(confident_union_with_no_confident_query)
+    try:
+        instance = Sam3SemanticPredictor(model, torch.device("cpu"), None, 0.5, 0.5)
+        semantic = Sam3SemanticPredictor(
+            model, torch.device("cpu"), None, 0.5, 0.5, mask_source="semantic"
+        )
+        assert not instance(image, categories).any()
+        prediction = semantic(image, categories)
+        assert prediction.shape == (8, 12)
+        assert prediction.any() and not prediction.all()
+    finally:
+        handle.remove()
+
+
+def test_training_logs_components_and_gradient_clipping(
+    tiny_dataset, tiny_model_dir, tmp_path, monkeypatch
+):
+    import json
+
+    from src.training import train
+
+    args = model_args(tiny_dataset, tiny_model_dir, tmp_path)
+    args.epochs = args.log_every = 1
+    args.grad_accum = 2
+    args.eval_mask_source = "semantic"
+    # Exercise the complete loop with real forward/backward on the tiny CPU
+    # model; replace only CUDA memory/device reporting.
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "CPU test")
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda device: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device: 0)
+    train(args, torch.device("cpu"))
+    records = [
+        json.loads(line) for line in (args.output_dir / "log.jsonl").read_text().splitlines()
+    ]
+    epoch = records[-1]
+    assert epoch["optimizer_updates"] == epoch["step"] == 2
+    assert epoch["grad_norm_mean_before_clip"] >= 0
+    assert 0 <= epoch["grad_clip_fraction"] <= 1
+    assert epoch["val_eval_mask_source"] == "semantic"
+    weights = PlantSegCriterion.weights
+    assert epoch["train_loss"] == pytest.approx(
+        sum(epoch["train_loss_components"][key] * value for key, value in weights.items())
+    )
+    assert set(records[0]["rank0_loss_components"]) == set(weights)
+
+
+def test_semantic_fast_path_preserves_outputs_and_shared_gradients(
+    tiny_dataset, tiny_model_dir, tmp_path, monkeypatch
+):
+    from src.losses import SemanticPlantSegCriterion
+    from src.sam3_adapter import configure_semantic_only
+
+    args = model_args(tiny_dataset, tiny_model_dir, tmp_path)
+    args.gradient_checkpointing = False
+    model, _ = prepare_model(args, torch.device("cpu"))
+    model.eval()
+    dataset = PlantSegDataset(args)
+    batch = PlantSegCollator(model._plantseg_processor, dataset.categories, 2, 1, 8)([dataset[0]])
+    reference = forward_model(model, batch["inputs"], batch["prompt_ids"])
+    reference_losses = PlantSegCriterion()(reference, batch["targets"])
+    criterion = SemanticPlantSegCriterion()
+    shared = (model.mask_decoder.semantic_projection.weight, model.text_projection.weight)
+    expected_loss = sum(reference_losses[key] * weight for key, weight in criterion.weights.items())
+    expected_gradients = torch.autograd.grad(expected_loss, shared)
+
+    def unexpected_instance_projection(*args, **kwargs):
+        raise AssertionError("semantic path must skip instance projection")
+
+    monkeypatch.setattr(
+        model.mask_decoder.instance_projection, "forward", unexpected_instance_projection
+    )
+    configure_semantic_only(model)
+    output = forward_model(model, batch["inputs"], batch["prompt_ids"])
+    assert output.pred_masks is None
+    torch.testing.assert_close(output.semantic_seg, reference.semantic_seg)
+    torch.testing.assert_close(output.presence_logits, reference.presence_logits)
+    losses = criterion(output, batch["targets"])
+    for name in criterion.weights:
+        torch.testing.assert_close(losses[name], reference_losses[name])
+    for actual, expected in zip(torch.autograd.grad(losses["loss"], shared), expected_gradients):
+        torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("flip", [False, True])
+def test_semantic_png_target_matches_combined_without_decoding_instances(
+    tiny_dataset, tiny_model_dir, tmp_path, monkeypatch, flip
+):
+    args = model_args(tiny_dataset, tiny_model_dir, tmp_path)
+    monkeypatch.setattr(random, "random", lambda: 0.0 if flip else 1.0)
+    reference = PlantSegDataset(args)[0]
+    args.loss_mode = "semantic"
+    dataset = PlantSegDataset(args)
+
+    def unexpected_decode(*args, **kwargs):
+        raise AssertionError("semantic PNG data must bypass instance RLE decoding")
+
+    monkeypatch.setattr("src.sam3_data.mask_utils.decode", unexpected_decode)
+    actual = dataset[0]
+    torch.testing.assert_close(
+        actual["target"]["semantic_mask"], reference["target"]["semantic_mask"]
+    )
+    np.testing.assert_array_equal(actual["image"], reference["image"])
+    assert actual["category_id"] == reference["category_id"]
+
+
+@pytest.mark.parametrize("checkpointing", [False, True])
+def test_semantic_budget_run_initializes_combined_checkpoint_and_validates_early(
+    tiny_dataset, tiny_model_dir, tmp_path, monkeypatch, checkpointing
+):
+    import json
+
+    from src.losses import SEMANTIC_LOSS_VERSION, SemanticPlantSegCriterion
+    from src.runtime import rng_state
+    from src.training import checkpoint_payload, save_checkpoint, train
+
+    args = model_args(tiny_dataset, tiny_model_dir, tmp_path)
+    original, _ = prepare_model(args, torch.device("cpu"))
+    optimizer = torch.optim.AdamW([p for p in original.parameters() if p.requires_grad])
+    args.init_from = tmp_path / "original.pt"
+    save_checkpoint(
+        args.init_from,
+        checkpoint_payload(
+            original,
+            optimizer,
+            torch.amp.GradScaler("cuda", enabled=False),
+            args,
+            20,
+            441,
+            0.04,
+            0,
+            [rng_state()],
+            {},
+        ),
+    )
+    args.loss_mode = args.eval_mask_source = "semantic"
+    args.max_updates = 1
+    args.epochs = 3
+    args.val_every = 20
+    args.grad_accum = 2
+    args.gradient_checkpointing = checkpointing
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "CPU test")
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda device: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device: 0)
+    train(args, torch.device("cpu"))
+    record = json.loads((args.output_dir / "log.jsonl").read_text().splitlines()[-1])
+    assert record["epoch"] == record["step"] == record["optimizer_updates"] == 1
+    assert record["update_budget_reached"] is True
+    assert record["val_num_images"] == 3
+    assert set(record["train_loss_components"]) == set(SemanticPlantSegCriterion.weights)
+    saved = torch.load(args.output_dir / "best.pt", map_location="cpu", weights_only=False)
+    assert saved["model_identity"]["loss_version"] == SEMANTIC_LOSS_VERSION
 
 
 def test_processor_batches_positive_and_negative_targets(tiny_dataset, tiny_model_dir, tmp_path):
@@ -399,7 +575,50 @@ def test_hungarian_loss_is_invariant_to_target_order_and_handles_negative():
     assert torch.isfinite(criterion(output, [negative])["loss"])
 
 
-def test_real_transformers_ddp_checkpointing(tiny_dataset, tiny_model_dir, tmp_path):
+@pytest.mark.parametrize("target_count", [0, 2])
+def test_sparse_mask_backward_matches_dense_interpolation(target_count):
+    from src.losses import dice_loss
+
+    torch.manual_seed(21)
+    masks = torch.randn(1, 5, 6, 8, requires_grad=True)
+    boxes = torch.tensor([[[0.1, 0.1, 0.8, 0.8]] * 5], requires_grad=True)
+    output = SimpleNamespace(
+        pred_masks=masks,
+        pred_logits=torch.randn(1, 5, requires_grad=True),
+        pred_boxes=boxes,
+        presence_logits=torch.randn(1, 1, requires_grad=True),
+        semantic_seg=torch.randn(1, 1, 6, 8, requires_grad=True),
+    )
+    target = {
+        "boxes": boxes[0, :target_count].detach(),
+        "masks": (torch.rand(target_count, 4, 5) > 0.5).float(),
+        "semantic_mask": torch.ones(1, 4, 5) if target_count else torch.zeros(1, 4, 5),
+    }
+    criterion = PlantSegCriterion()
+    dense = torch.nn.functional.interpolate(
+        masks[0, :, None], (4, 5), mode="bilinear", align_corners=False
+    )[:, 0]
+    rows, columns = criterion.match(
+        dense.detach(), boxes[0].detach(), output.pred_logits[0], target
+    )
+    losses = criterion(output, [target])
+    if target_count:
+        bce = torch.nn.functional.binary_cross_entropy_with_logits(
+            dense[rows], target["masks"][columns]
+        )
+        dice = dice_loss(dense[rows], target["masks"][columns]).mean()
+        torch.testing.assert_close(losses["mask_bce"], bce)
+        torch.testing.assert_close(losses["mask_dice"], dice)
+        reference_loss = bce * criterion.weights["mask_bce"] + dice * criterion.weights["mask_dice"]
+    else:
+        reference_loss = dense.sum() * 0
+    expected_gradient = torch.autograd.grad(reference_loss, masks, retain_graph=True)[0]
+    actual_gradient = torch.autograd.grad(losses["loss"], masks)[0]
+    torch.testing.assert_close(actual_gradient, expected_gradient)
+
+
+@pytest.mark.parametrize("loss_mode", ["combined", "semantic", "known_disease"])
+def test_real_transformers_ddp_checkpointing(tiny_dataset, tiny_model_dir, tmp_path, loss_mode):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -416,6 +635,7 @@ def test_real_transformers_ddp_checkpointing(tiny_dataset, tiny_model_dir, tmp_p
             str(tiny_dataset),
             str(tiny_model_dir),
             str(tmp_path / "ddp"),
+            loss_mode,
         ],
         capture_output=True,
         text=True,

@@ -2,6 +2,53 @@
 
 Pipeline dùng **Hugging Face Transformers `Sam3Model` và `Sam3Processor`**, tải pretrained weights dạng safetensors bằng `from_pretrained`, hỗ trợ một GPU hoặc DDP qua `torchrun`. Dataset mặc định là `dataset/plantseg`; tự nhận `datasets/plantseg` nếu thư mục thứ nhất không tồn tại. Có thể truyền đường dẫn bất kỳ bằng `--dataset_dir`.
 
+## Training khi đã biết lớp bệnh
+
+Với bài toán hiện tại, lớp bệnh là đầu vào được cung cấp trước. Dùng
+`--known_disease`: mỗi ảnh có đúng một prompt bệnh đúng, không lấy negative prompt;
+loss chỉ gồm semantic BCE + Dice (trọng số 5/5), không dùng query/presence/box loss.
+SAM3 giữ text conditioning và học mask foreground của bệnh đã cho. Validation dùng
+`oracle` với mask semantic; nội suy logits về kích thước gốc rồi áp dụng
+`mask_threshold`. Không lọc mask theo query confidence hoặc concept presence,
+vì không cần model quyết định lại bệnh có trong ảnh hay không.
+
+Khởi tạo từ checkpoint hiện tại bằng **`--init_from` và output mới**. Optimizer,
+lịch LR và best metric được bắt đầu lại vì objective/protocol đã đổi. Ví dụ trên
+Kaggle 2 × T4 (thay đường dẫn dataset/checkpoint theo session):
+
+```bash
+DATASET_DIR=/kaggle/input/<dataset>/plantseg \
+INIT_FROM=/kaggle/input/<checkpoint>/last.pt \
+OUTPUT_DIR=/kaggle/working/plantseg_sam3_known_disease_672_s1105 \
+bash scripts/train_kaggle_known_disease.sh
+```
+
+Preset dùng 672 × 672, batch 1/GPU, accumulation 8, 20 epoch, validation mỗi epoch
+và early stopping sau 4 lần validation không cải thiện. Chọn checkpoint bằng mIoU
+theo lớp bệnh không gồm nền, với lớp bệnh đúng đã được cung cấp. Chỉ chọn threshold
+trên validation; test dùng cấu hình đã chốt. Đây là **disease-conditioned
+segmentation**, khác protocol tự dự đoán 115 bệnh ở các mục bên dưới.
+
+Đánh giá toàn bộ split với checkpoint mới:
+
+```bash
+torchrun --standalone --nnodes=1 --nproc_per_node=2 evaluate.py \
+  --dataset_dir /kaggle/input/<dataset>/plantseg --split test \
+  --resume /kaggle/working/plantseg_sam3_known_disease_672_s1105/best.pt \
+  --known_disease --image_size 672 --amp fp16 \
+  --cache_dir /kaggle/working/hf-cache \
+  --save_predictions /kaggle/working/known_disease_test/predictions \
+  --output_dir /kaggle/working/known_disease_test
+```
+
+`inference.py` tự nhận chế độ `known_disease` từ checkpoint mới khi xuất một vài
+ảnh mẫu. Có thể đặt `--known_disease` để thử mask semantic trực tiếp từ checkpoint
+cũ; đó là thay đổi nhánh inference, không phải kết quả sau fine-tune. Kết quả oracle
+47,35% trên 5 ảnh trước đây dùng **instance mask với confidence filtering** nên
+không thay cho metric validation của protocol mask-only mới. Launcher run ngắn
+`scripts/train_kaggle_fast.sh` cũng dùng protocol known-disease này, gồm cả baseline
+validation trước fine-tune.
+
 ## Cài đặt trên Kaggle 2 × T4
 
 Toàn bộ dependencies cho train, evaluate, test và lint được gộp trong một file `requirements.txt`.
@@ -84,6 +131,11 @@ Nếu `whoami()` báo 401, token không được Hugging Face chấp nhận: c�
 Token được truyền qua môi trường tới worker và được truyền tường minh vào các lệnh `from_pretrained`, kể cả khi tắt implicit token. Token không ghi trong arguments/checkpoint/run-config. Train và launcher kiểm tra quyền đọc config qua HTTP trước khi khởi tạo DDP/chuẩn bị annotations; model local, `--local_files_only` hoặc `HF_HUB_OFFLINE=1` bỏ qua kiểm tra mạng. Có thể dùng `hf auth login` thay cho Kaggle Secrets nếu chạy terminal. Library không thay thế yêu cầu quyền truy cập model.
 
 ## Dữ liệu và nhãn
+
+Nếu train lâu nhưng mIoU thấp, xem [tối ưu mask loss, log gradient và thử semantic
+inference trên checkpoint hiện tại](docs/optimization.md). Chế độ instance mặc định
+và lịch validation hiện có được giữ; semantic inference là thử nghiệm cần đo trên
+validation.
 
 ```text
 plantseg/

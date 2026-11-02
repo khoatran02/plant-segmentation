@@ -10,11 +10,23 @@ from pathlib import Path
 
 import torch
 
-from src.losses import LOSS_VERSION, PlantSegCriterion
+from src.losses import (
+    KNOWN_DISEASE_LOSS_VERSION,
+    LOSS_VERSION,
+    SEMANTIC_LOSS_VERSION,
+    KnownDiseaseCriterion,
+    PlantSegCriterion,
+    SemanticPlantSegCriterion,
+)
 from src.runtime import file_sha256
 
 
 def add_model_arguments(parser: argparse.ArgumentParser):
+    parser.add_argument(
+        "--known_disease",
+        action="store_true",
+        help="Given the disease label, train/evaluate its semantic mask without classification",
+    )
     parser.add_argument(
         "--model_id", default="facebook/sam3", help="HF model ID or local save_pretrained directory"
     )
@@ -35,6 +47,26 @@ def add_model_arguments(parser: argparse.ArgumentParser):
         type=int,
         help="Square input resolution (e.g. 672); omit to use the pretrained model size",
     )
+
+
+def resolve_protocol(args, parser, *, training=False):
+    """Resolve dependent defaults and reject conflicting known-disease settings."""
+    defaults = {
+        "eval_mode": "oracle" if training else "all_classes",
+        "eval_mask_source": "instance",
+    }
+    required = {"eval_mode": "oracle", "eval_mask_source": "semantic"}
+    if training:
+        defaults.update(loss_mode="combined", pos_prob=0.7, prompts_per_image=1)
+        required.update(loss_mode="semantic", pos_prob=1.0, prompts_per_image=1)
+    for name, default in defaults.items():
+        value = getattr(args, name, None)
+        if args.known_disease:
+            if value is not None and value != required[name]:
+                parser.error(f"--known_disease requires --{name} {required[name]}")
+            setattr(args, name, required[name])
+        elif value is None:
+            setattr(args, name, default)
 
 
 def configure_input_resolution(config, processor, image_size):
@@ -191,7 +223,13 @@ def build_model(args):
         "resolved_revision": resolved if resolved is not None else args.model_revision,
         "local_files_sha256": local_hashes,
         "transformers_version": transformers.__version__,
-        "loss_version": LOSS_VERSION,
+        "loss_version": (
+            KNOWN_DISEASE_LOSS_VERSION
+            if getattr(args, "known_disease", False)
+            else SEMANTIC_LOSS_VERSION
+            if getattr(args, "loss_mode", "combined") == "semantic"
+            else LOSS_VERSION
+        ),
         "scratch_seed": args.seed if args.no_pretrained else None,
         "metadata_sha256": file_sha256(args.dataset_dir / "Metadata.csv"),
     }
@@ -282,8 +320,65 @@ def build_optimizer(model, args):
     return torch.optim.AdamW(parameters, lr=args.lr)
 
 
-def build_criterion():
-    return PlantSegCriterion()
+def build_criterion(args=None):
+    if getattr(args, "known_disease", False):
+        return KnownDiseaseCriterion()
+    return (
+        SemanticPlantSegCriterion()
+        if getattr(args, "loss_mode", "combined") == "semantic"
+        else PlantSegCriterion()
+    )
+
+
+def configure_semantic_only(model):
+    """Keep SAM3's prompt attention and pixel decoder, skip instance mask synthesis.
+
+    Uses the pinned Transformers SAM3 mask-decoder API. Parameter names and state
+    dicts remain unchanged, so combined-objective adaptation weights can initialize
+    this path. The DETR decoder still runs to produce presence confidence.
+    """
+    from types import MethodType
+
+    from transformers.models.sam3.modeling_sam3 import (
+        Sam3MaskDecoderOutput,
+        create_bidirectional_mask,
+    )
+
+    def semantic_forward(
+        block,
+        decoder_queries,
+        backbone_features,
+        encoder_hidden_states,
+        prompt_features=None,
+        prompt_mask=None,
+        **kwargs,
+    ):
+        if prompt_features is not None:
+            normalized = block.prompt_cross_attn_norm(encoder_hidden_states)
+            attention_mask = None
+            if prompt_mask is not None:
+                attention_mask = create_bidirectional_mask(
+                    config=block.config,
+                    inputs_embeds=normalized,
+                    encoder_hidden_states=prompt_features,
+                    attention_mask=prompt_mask,
+                )
+            attended, _ = block.prompt_cross_attn(
+                query=normalized,
+                key=prompt_features,
+                value=prompt_features,
+                attention_mask=attention_mask,
+                **kwargs,
+            )
+            encoder_hidden_states = encoder_hidden_states + block.prompt_cross_attn_dropout(
+                attended
+            )
+        pixels = block._embed_pixels(
+            backbone_features=backbone_features, encoder_hidden_states=encoder_hidden_states
+        )
+        return Sam3MaskDecoderOutput(semantic_seg=block.semantic_projection(pixels))
+
+    model.mask_decoder.forward = MethodType(semantic_forward, model.mask_decoder)
 
 
 def configure_activation_checkpointing(model, enabled):

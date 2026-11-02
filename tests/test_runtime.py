@@ -172,6 +172,49 @@ def test_checkpoint_parameter_mismatch_fails(tmp_path):
         load_adaptation(model, path)
 
 
+def test_semantic_cli_requires_matching_inference_and_positive_budget():
+    with pytest.raises(SystemExit):
+        parse_args(["--loss_mode", "semantic"])
+    with pytest.raises(SystemExit):
+        parse_args(["--max_updates", "0"])
+    args = parse_args(
+        ["--loss_mode", "semantic", "--eval_mask_source", "semantic", "--max_updates", "300"]
+    )
+    assert args.max_updates == 300
+
+
+def test_loss_change_is_allowed_only_for_weights_initialization(tmp_path):
+    from src.training import checkpoint_payload
+
+    model = torch.nn.Linear(2, 1)
+    model._plantseg_identity = {"base": "same", "loss_version": "combined"}
+    args = parse_args([])
+    optimizer = torch.optim.AdamW(model.parameters())
+    state = checkpoint_payload(
+        model,
+        optimizer,
+        torch.amp.GradScaler("cuda", enabled=False),
+        args,
+        0,
+        1,
+        0.4,
+        0,
+        [rng_state()],
+        {},
+    )
+    path = tmp_path / "last.pt"
+    torch.save(state, path)
+    model._plantseg_identity["loss_version"] = "semantic"
+    with pytest.raises(ValueError, match="loss or prompt"):
+        load_adaptation(model, path)
+    load_adaptation(model, path, allow_loss_change=True)
+    with pytest.raises(ValueError, match="not exact resume"):
+        load_adaptation(model, path, args, allow_loss_change=True)
+    model._plantseg_identity["base"] = "different"
+    with pytest.raises(ValueError, match="Base checkpoint"):
+        load_adaptation(model, path, allow_loss_change=True)
+
+
 def test_resume_can_opt_in_to_validation_schedule_change_only(tmp_path):
     from src.training import checkpoint_payload
 
@@ -190,12 +233,38 @@ def test_resume_can_opt_in_to_validation_schedule_change_only(tmp_path):
     args.eval_prompt_batch_size = 4
     restored = load_adaptation(model, path, args)
     assert (restored["epoch"], restored["step"], restored["best_metric"]) == (3, 100, 0.4)
-    for key, value in (("eval_mode", "all_classes"), ("limit_val", 10), ("batch_size", 2)):
+    for key, value in (
+        ("eval_mode", "all_classes"),
+        ("limit_val", 10),
+        ("batch_size", 2),
+        ("max_updates", 1),
+        ("loss_mode", "semantic"),
+    ):
         previous = getattr(args, key)
         setattr(args, key, value)
         with pytest.raises(ValueError, match=f"Resume mismatch for {key}"):
             load_adaptation(model, path, args)
         setattr(args, key, previous)
+
+
+def test_resume_mask_source_guard_including_legacy_checkpoint(tmp_path):
+    from src.training import checkpoint_payload
+
+    model = torch.nn.Linear(2, 1)
+    model._plantseg_identity = {"base": "same"}
+    args = parse_args([])
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    state = checkpoint_payload(model, optimizer, scaler, args, 0, 1, 0.4, 0, [rng_state()], {})
+    state["config"].pop("eval_mask_source")
+    path = tmp_path / "last.pt"
+    torch.save(state, path)
+    load_adaptation(model, path, args)
+    args.eval_mask_source = "semantic"
+    with pytest.raises(ValueError, match="Resume mismatch for eval_mask_source"):
+        load_adaptation(model, path, args)
+    # Weights-only initialization and standalone evaluation can change the path.
+    load_adaptation(model, path)
 
 
 def test_external_predictions_end_to_end(tiny_dataset, tmp_path):

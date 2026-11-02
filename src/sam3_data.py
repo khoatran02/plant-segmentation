@@ -44,16 +44,38 @@ class PlantSegDataset(Dataset):
         }
         self.training, self.label_policy = training, args.label_policy
         self.mask_size = args.loss_mask_size
+        self.semantic_png = (
+            getattr(args, "loss_mode", "combined") == "semantic" and args.annotation_source == "png"
+        )
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, index):
         info = self.images[index]
-        image, _ = load_pair(self.samples[info["file_name"]], self.label_policy)
+        image, label_mask = load_pair(self.samples[info["file_name"]], self.label_policy)
         flip = self.training and random.random() < 0.5
         if flip:
             image = ImageOps.mirror(image)
+        if self.semantic_png:
+            # Semantic training needs the PNG union, not decoded pseudo-instances.
+            # Preserve the exact area-resize and augmentation used by combined mode.
+            union = (label_mask[:, ::-1] if flip else label_mask) > 0
+            semantic = F.interpolate(
+                torch.as_tensor(union.astype(np.float32))[None, None],
+                (self.mask_size, self.mask_size),
+                mode="area",
+            )[0]
+            return {
+                "image": image,
+                "category_id": info["disease_id"],
+                "name": info["file_name"],
+                "target": {
+                    "boxes": torch.zeros((0, 4)),
+                    "masks": torch.zeros((0, self.mask_size, self.mask_size)),
+                    "semantic_mask": semantic,
+                },
+            }
         boxes, masks = [], []
         union = np.zeros((image.height, image.width), dtype=np.uint8)
         for annotation in self.annotations[info["id"]]:

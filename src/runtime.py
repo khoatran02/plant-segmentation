@@ -133,7 +133,9 @@ def lr_factor(step: int, total: int, warmup: int) -> float:
     return 0.5 * (1 + math.cos(math.pi * progress))
 
 
-def load_adaptation(model, path: Path, expected_args=None, *, allow_resolution_change=False):
+def load_adaptation(
+    model, path: Path, expected_args=None, *, allow_resolution_change=False, allow_loss_change=False
+):
     state = torch.load(path, map_location="cpu", weights_only=False)
     if "trainable" not in state:
         raise ValueError(
@@ -141,6 +143,8 @@ def load_adaptation(model, path: Path, expected_args=None, *, allow_resolution_c
         )
     if allow_resolution_change and expected_args is not None:
         raise ValueError("Resolution changes require a new run with --init_from, not --resume")
+    if allow_loss_change and expected_args is not None:
+        raise ValueError("Loss changes require --init_from, not exact resume")
     if hasattr(model, "_plantseg_image_size") and not allow_resolution_change:
         # Before configurable resolution, checkpoints always used the base model size.
         saved_size = state.get("input_image_size") or model._plantseg_native_image_size
@@ -150,13 +154,16 @@ def load_adaptation(model, path: Path, expected_args=None, *, allow_resolution_c
                 f"Use --image_size {saved_size[0]} to resume/evaluate, or --init_from "
                 "with a new --output_dir to train at another resolution."
             )
-    if (
-        hasattr(model, "_plantseg_identity")
-        and state.get("model_identity") != model._plantseg_identity
-    ):
-        raise ValueError(
-            "Base checkpoint/model revision, Transformers backend or prompt vocabulary differs from adaptation checkpoint"
-        )
+    if hasattr(model, "_plantseg_identity"):
+        saved_identity = dict(state.get("model_identity") or {})
+        current_identity = dict(model._plantseg_identity)
+        if allow_loss_change:
+            saved_identity.pop("loss_version", None)
+            current_identity.pop("loss_version", None)
+        if saved_identity != current_identity:
+            raise ValueError(
+                "Base checkpoint/model revision, Transformers backend, loss or prompt vocabulary differs from adaptation checkpoint"
+            )
     expected = {n for n, p in model.named_parameters() if p.requires_grad}
     if expected != set(state["trainable"]):
         raise ValueError(
@@ -168,6 +175,19 @@ def load_adaptation(model, path: Path, expected_args=None, *, allow_resolution_c
                 "Exact resume requires Transformers checkpoint format 3; the old upstream backend is incompatible"
             )
         saved = state.get("config", {})
+        for key, legacy_default in (
+            ("known_disease", False),
+            ("loss_mode", "combined"),
+            ("max_updates", None),
+        ):
+            if saved.get(key, legacy_default) != getattr(expected_args, key, legacy_default):
+                raise ValueError(f"Resume mismatch for {key}; use --init_from in a new run")
+        # Old checkpoints used instance masks. Selection scores from the two
+        # inference paths must not share a best-metric/patience history.
+        if saved.get("eval_mask_source", "instance") != getattr(
+            expected_args, "eval_mask_source", "instance"
+        ):
+            raise ValueError("Resume mismatch for eval_mask_source; use --init_from in a new run")
         for key in (
             "scope",
             "annotation_source",

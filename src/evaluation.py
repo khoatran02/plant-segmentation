@@ -53,13 +53,29 @@ def class_evidence(masks, scores, shape, mask_threshold=0.5, chunk_size=8):
 
 
 class Sam3SemanticPredictor:
-    def __init__(self, model, device, dtype, score_threshold, mask_threshold, prompt_batch_size=1):
+    def __init__(
+        self,
+        model,
+        device,
+        dtype,
+        score_threshold,
+        mask_threshold,
+        prompt_batch_size=1,
+        mask_source="instance",
+        known_disease=False,
+    ):
         if prompt_batch_size < 1:
             raise ValueError("prompt_batch_size must be positive")
+        if mask_source not in ("instance", "semantic"):
+            raise ValueError("mask_source must be instance or semantic")
+        if known_disease and mask_source != "semantic":
+            raise ValueError("Known-disease prediction requires semantic masks")
         self.model, self.device, self.dtype = model, device, dtype
         self.score_threshold, self.mask_threshold = score_threshold, mask_threshold
         self.processor = model._plantseg_processor
         self.prompt_batch_size = prompt_batch_size
+        self.mask_source = mask_source
+        self.known_disease = known_disease
         # A predictor belongs to one evaluation: projections must refresh after training.
         self.text_batches = {}
 
@@ -105,6 +121,8 @@ class Sam3SemanticPredictor:
 
     @torch.inference_mode()
     def __call__(self, image, categories):
+        if self.known_disease and len(categories) != 1:
+            raise ValueError("Known-disease prediction requires exactly one supplied disease")
         with torch.autocast(self.device.type, dtype=self.dtype, enabled=self.dtype is not None):
             image_inputs = self.processor(images=image, return_tensors="pt")
             vision = self.model.get_vision_features(
@@ -118,14 +136,32 @@ class Sam3SemanticPredictor:
                     vision_embeds=self._expand_vision(vision, len(selected)),
                     **self._text_inputs(selected),
                 )
-                scores = (
-                    output.pred_logits.float().sigmoid() * output.presence_logits.float().sigmoid()
-                )
                 for index, category in enumerate(selected):
-                    keep = scores[index] > self.score_threshold
+                    if self.mask_source == "semantic":
+                        # One prompt-conditioned union mask. Presence replaces query
+                        # confidence; retain the same native-size interpolation policy.
+                        confidence = (
+                            torch.ones(1, device=self.device)
+                            if self.known_disease
+                            else output.presence_logits[index].float().sigmoid().reshape(1)
+                        )
+                        masks = output.semantic_seg[index].reshape(
+                            1, *output.semantic_seg.shape[-2:]
+                        )
+                    else:
+                        confidence = (
+                            output.pred_logits[index].float().sigmoid()
+                            * output.presence_logits[index].float().sigmoid()
+                        )
+                        masks = output.pred_masks[index]
+                    keep = (
+                        torch.ones_like(confidence, dtype=torch.bool)
+                        if self.known_disease
+                        else confidence > self.score_threshold
+                    )
                     evidence = class_evidence(
-                        output.pred_masks[index][keep],
-                        scores[index][keep],
+                        masks[keep],
+                        confidence[keep],
                         best.shape,
                         self.mask_threshold,
                     )
@@ -150,6 +186,8 @@ def evaluate(model, args, split, device, dtype, output_prefix=None):
     metrics = SegmentationMetrics(categories)
     label_report = []
     if model is not None:
+        if getattr(args, "known_disease", False) and args.eval_mode != "oracle":
+            raise ValueError("Known-disease evaluation requires oracle prompts")
         model.eval()
         predictor = Sam3SemanticPredictor(
             model,
@@ -158,6 +196,8 @@ def evaluate(model, args, split, device, dtype, output_prefix=None):
             args.score_threshold,
             args.mask_threshold,
             getattr(args, "eval_prompt_batch_size", 1),
+            getattr(args, "eval_mask_source", "instance"),
+            getattr(args, "known_disease", False),
         )
     prediction_dir = getattr(args, "prediction_dir", None)
     save_dir = getattr(args, "save_predictions", None)
@@ -196,6 +236,9 @@ def evaluate(model, args, split, device, dtype, output_prefix=None):
     result["dataset_fingerprint"] = dataset_fingerprint(args.dataset_dir, samples, "png", split)
     if model is not None:
         result["model_identity"] = getattr(model, "_plantseg_identity", None)
+        result["checkpoint_loss_version"] = getattr(
+            model, "_plantseg_checkpoint_loss_version", None
+        )
         result["adaptation_checkpoint"] = str(args.resume) if args.resume else None
     if prediction_dir is not None:
         result["prediction_dir"] = str(prediction_dir.resolve())
@@ -209,8 +252,15 @@ def evaluate(model, args, split, device, dtype, output_prefix=None):
         {
             "split": split,
             "eval_mode": args.eval_mode,
+            "known_disease": getattr(args, "known_disease", False),
+            "confidence_filtering": model is not None and not getattr(args, "known_disease", False),
+            "eval_mask_source": (
+                getattr(args, "eval_mask_source", "instance") if model is not None else "external"
+            ),
             "dataset_dir": str(args.dataset_dir.resolve()),
-            "score_threshold": args.score_threshold,
+            "score_threshold": (
+                None if getattr(args, "known_disease", False) else args.score_threshold
+            ),
             "mask_threshold": args.mask_threshold,
             "limited": limit is not None,
             "world_size": world_size(),
@@ -259,7 +309,6 @@ def main():
     parser.add_argument(
         "--eval_mode",
         choices=("oracle", "all_classes", "external"),
-        default="all_classes",
     )
     parser.add_argument("--output_dir", type=Path, default=Path("outputs/evaluation"))
     parser.add_argument("--save_predictions", type=Path)
@@ -269,7 +318,17 @@ def main():
     parser.add_argument("--limit_val", type=int)
     parser.add_argument("--limit_test", type=int)
     parser.add_argument("--eval_prompt_batch_size", type=int, default=1)
+    parser.add_argument(
+        "--eval_mask_source",
+        choices=("instance", "semantic"),
+        help="Experimental semantic mode uses semantic logits and presence confidence",
+    )
     args = parser.parse_args()
+    from src.sam3_adapter import resolve_protocol
+
+    resolve_protocol(args, parser)
+    if args.known_disease and args.prediction_dir is not None:
+        parser.error("--known_disease requires model inference, not --prediction_dir")
     if args.eval_prompt_batch_size < 1:
         parser.error("--eval_prompt_batch_size must be positive")
     if args.image_size is not None and args.image_size < 1:
@@ -295,9 +354,15 @@ def main():
             args.frozen_dtype = "fp16" if args.amp != "off" else "fp32"
             args.gradient_checkpointing = False
             dtype = resolve_dtype(args.amp, device)
-            model, _ = prepare_model(args, device)
+            model, _ = prepare_model(args, device, for_evaluation=True)
             if args.resume:
-                load_adaptation(model, args.resume)
+                state = load_adaptation(model, args.resume, allow_loss_change=True)
+                if state.get("config", {}).get("known_disease", False) and not args.known_disease:
+                    raise ValueError(
+                        "This checkpoint was trained with known disease labels; use --known_disease"
+                    )
+                model._plantseg_checkpoint_loss_version = state["model_identity"]["loss_version"]
+                del state
         args.output_dir.mkdir(parents=True, exist_ok=True)
         result = evaluate(model, args, args.split, device, dtype, args.output_dir / args.split)
         if rank() == 0:

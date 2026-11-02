@@ -56,7 +56,7 @@ def resolve_dtype(name, device):
     return {"fp16": torch.float16, "bf16": torch.bfloat16, "off": None}[name]
 
 
-def prepare_model(args, device):
+def prepare_model(args, device, *, for_evaluation=False):
     from src import sam3_adapter as adapter
 
     model = adapter.build_model(args)
@@ -70,6 +70,10 @@ def prepare_model(args, device):
     if half_frozen:
         for module in frozen:
             module.half()
+    if getattr(args, "loss_mode", "combined") == "semantic" or (
+        for_evaluation and args.eval_mask_source == "semantic"
+    ):
+        adapter.configure_semantic_only(model)
     adapter.configure_activation_checkpointing(model, args.gradient_checkpointing)
     return model.to(device), frozen
 
@@ -195,7 +199,9 @@ def train(args, device):
     scaler = torch.amp.GradScaler(
         "cuda", init_scale=args.amp_init_scale, enabled=dtype == torch.float16
     )
-    loss_module = TrainingLoss(model, adapter.build_criterion().to(device))
+    criterion = adapter.build_criterion(args).to(device)
+    loss_names = tuple(criterion.weights)
+    loss_module = TrainingLoss(model, criterion)
     if distributed():
         loss_module = DDP(
             loss_module,
@@ -207,6 +213,8 @@ def train(args, device):
     trainable = [p for p in model.parameters() if p.requires_grad]
     updates_per_epoch = math.ceil(len(loader) / args.grad_accum)
     total_updates = updates_per_epoch * args.epochs
+    if args.max_updates is not None:
+        total_updates = min(total_updates, args.max_updates)
     warmup = (
         args.warmup_steps
         if args.warmup_steps is not None
@@ -221,6 +229,7 @@ def train(args, device):
             manifest[split] = json.load(stream)["plantseg"]
     config = {
         "arguments": vars(args),
+        "loss_weights": criterion.weights,
         "source_revision": revision(ROOT),
         "backend": "transformers",
         "python": platform.python_version(),
@@ -270,7 +279,7 @@ def train(args, device):
     elif (args.output_dir / "last.pt").exists():
         raise ValueError("Output contains last.pt; use --resume or a new --output_dir")
     elif args.init_from:
-        load_adaptation(model, args.init_from, allow_resolution_change=True)
+        load_adaptation(model, args.init_from, allow_resolution_change=True, allow_loss_change=True)
         if rank() == 0:
             print(
                 f"[init] Loaded adaptation weights from {args.init_from}; "
@@ -281,7 +290,10 @@ def train(args, device):
         write_json(args.output_dir / "run-config.json", config)
         model._plantseg_processor.save_pretrained(args.output_dir / "processor")
         print(
-            f"[run] {world_size()} GPU, image_size={model._plantseg_image_size}, effective batch={config['effective_batch_size']}, trainable={sum(p.numel() for p in trainable) / 1e6:.1f}M, eval={args.eval_mode}",
+            f"[run] {world_size()} GPU, image_size={model._plantseg_image_size}, "
+            f"effective batch={config['effective_batch_size']}, updates/epoch={updates_per_epoch}, "
+            f"warmup updates={warmup}, trainable={sum(p.numel() for p in trainable) / 1e6:.1f}M, "
+            f"eval={args.eval_mode}/{args.eval_mask_source}",
             flush=True,
         )
     log_path = args.output_dir / "log.jsonl"
@@ -292,6 +304,8 @@ def train(args, device):
                 stream.write(json.dumps(record, allow_nan=False) + "\n")
 
     for epoch in range(start, args.epochs):
+        if args.max_updates is not None and step >= args.max_updates:
+            break
         if sampler is not None:
             sampler.set_epoch(epoch)
         if hasattr(train_set, "set_curr_epoch"):
@@ -299,6 +313,10 @@ def train(args, device):
         adapter.set_train_mode(model, frozen)
         optimizer.zero_grad(set_to_none=True)
         running, seen, overflows = 0.0, 0, 0
+        component_totals = torch.zeros(len(loss_names), dtype=torch.float64, device=device)
+        # Sum of finite pre-clip norms, count, and count above the clipping threshold.
+        gradient_totals = torch.zeros(3, dtype=torch.float64, device=device)
+        epoch_start_step = step
         started = time.monotonic()
         torch.cuda.reset_peak_memory_stats(device)
         progress = tqdm(loader, desc=f"epoch {epoch + 1}/{args.epochs}", disable=rank() != 0)
@@ -319,6 +337,7 @@ def train(args, device):
                     )
                 scaler.scale(loss / group_size).backward()
             running += loss.detach().item()
+            component_totals += torch.stack([losses[name].detach() for name in loss_names])
             seen += 1
             if not update_now:
                 continue
@@ -333,6 +352,11 @@ def train(args, device):
             scaler.step(optimizer)
             scaler.update()
             did_update = scaler.get_scale() >= previous_scale
+            if did_update:
+                finite_norm = torch.isfinite(norm)
+                gradient_totals[0] += torch.where(finite_norm, norm, 0).double()
+                gradient_totals[1] += finite_norm
+                gradient_totals[2] += finite_norm & (norm > args.clip_norm)
             step += int(did_update)
             overflows += int(not did_update)
             optimizer.zero_grad(set_to_none=True)
@@ -344,22 +368,38 @@ def train(args, device):
                         "rank0_loss": running / seen,
                         "lr": optimizer.param_groups[0]["lr"],
                         "amp_scale": scaler.get_scale(),
+                        "rank0_loss_components": dict(
+                            zip(loss_names, (component_totals / seen).tolist())
+                        ),
+                        "grad_norm_before_clip": norm.item() if torch.isfinite(norm) else None,
                     }
                 )
                 progress.set_postfix(loss=f"{running / seen:.3f}", step=step)
+            if args.max_updates is not None and step >= args.max_updates:
+                break
         totals = torch.tensor([running, seen], dtype=torch.float64, device=device)
         if distributed():
             dist.all_reduce(totals)
+            dist.all_reduce(component_totals)
+            dist.all_reduce(gradient_totals)
+        norm_sum, norm_count, clipped_count = gradient_totals.tolist()
         record = {
             "epoch": epoch + 1,
             "step": step,
             "train_loss": (totals[0] / totals[1]).item(),
             "seconds": time.monotonic() - started,
             "amp_overflows": overflows,
+            "optimizer_updates": step - epoch_start_step,
+            "train_loss_components": dict(zip(loss_names, (component_totals / totals[1]).tolist())),
+            "grad_norm_mean_before_clip": norm_sum / norm_count if norm_count else None,
+            "grad_clip_fraction": clipped_count / norm_count if norm_count else None,
+            "learning_rates": [group["lr"] for group in optimizer.param_groups],
             "peak_gpu_memory_gib": torch.cuda.max_memory_allocated(device) / 2**30,
         }
         improved = False
-        if (epoch + 1) % args.val_every == 0 or epoch + 1 == args.epochs:
+        budget_reached = args.max_updates is not None and step >= args.max_updates
+        record["update_budget_reached"] = budget_reached
+        if (epoch + 1) % args.val_every == 0 or epoch + 1 == args.epochs or budget_reached:
             metrics = evaluate(model, args, "val", device, dtype, args.output_dir / "val-latest")
             record.update(
                 {
@@ -400,14 +440,25 @@ def train(args, device):
             record["epoch_seconds"] = time.monotonic() - started
             log(record)
             best_display = f"{best:.5f}" if best >= 0 else "N/A (not validated yet)"
+            current_metric = record.get(f"val_{args.selection_metric}")
+            current_display = f"{current_metric:.5f}" if current_metric is not None else "skipped"
             print(
                 f"[epoch {epoch + 1}] loss={record['train_loss']:.4f}, step={step}, "
+                f"updates={record['optimizer_updates']}, amp_skips={overflows}, "
+                f"val {args.selection_metric}={current_display}, "
                 f"best {args.selection_metric}={best_display}, train={record['seconds']:.1f}s, "
                 f"val={record.get('val_evaluation_seconds', 0):.1f}s, "
                 f"save={record['checkpoint_seconds']:.1f}s",
                 flush=True,
             )
         barrier()
+        if budget_reached:
+            if rank() == 0:
+                print(
+                    "[stop] optimizer update budget reached; validation/checkpoint saved",
+                    flush=True,
+                )
+            break
         if args.early_stopping_patience > 0 and bad_epochs >= args.early_stopping_patience:
             if rank() == 0:
                 print("[stop] early-stopping patience reached", flush=True)
@@ -439,7 +490,7 @@ def parse_args(argv=None):
         default=144,
         help="Mask supervision resolution; does not change eval resolution",
     )
-    parser.add_argument("--pos_prob", type=float, default=0.7)
+    parser.add_argument("--pos_prob", type=float)
     parser.add_argument("--limit_train", type=int)
     parser.add_argument("--limit_val", type=int)
     parser.add_argument("--workers", "--num_workers", dest="workers", type=int, default=2)
@@ -466,6 +517,16 @@ def parse_args(argv=None):
     )
     parser.add_argument("--device", choices=("cuda",), default="cuda")
     parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument(
+        "--max_updates",
+        type=int,
+        help="Stop after this many successful optimizer updates; validate and save at the boundary",
+    )
+    parser.add_argument(
+        "--loss_mode",
+        choices=("combined", "semantic"),
+        help="Semantic mode skips instance masks/matching; requires --eval_mask_source semantic",
+    )
     parser.add_argument("--batch_size", type=int, default=1, help="Per-GPU image batch")
     parser.add_argument(
         "--grad_accum",
@@ -495,7 +556,12 @@ def parse_args(argv=None):
         default=1,
         help="Prompts per inference batch sharing one image; increase after checking GPU memory",
     )
-    parser.add_argument("--eval_mode", choices=("oracle", "all_classes"), default="oracle")
+    parser.add_argument("--eval_mode", choices=("oracle", "all_classes"))
+    parser.add_argument(
+        "--eval_mask_source",
+        choices=("instance", "semantic"),
+        help="Experimental semantic mode uses semantic logits and presence confidence",
+    )
     parser.add_argument("--score_threshold", type=float, default=0.5)
     parser.add_argument("--mask_threshold", type=float, default=0.5)
     parser.add_argument(
@@ -508,6 +574,13 @@ def parse_args(argv=None):
     )
     parser.add_argument("--seed", type=int, default=1105)
     args = parser.parse_args(argv)
+    from src.sam3_adapter import resolve_protocol
+
+    resolve_protocol(args, parser, training=True)
+    if args.loss_mode == "semantic" and args.eval_mask_source != "semantic":
+        parser.error("--loss_mode semantic requires --eval_mask_source semantic")
+    if args.max_updates is not None and args.max_updates < 1:
+        parser.error("--max_updates must be positive")
     for name in (
         "epochs",
         "batch_size",

@@ -14,6 +14,8 @@ from torchvision.ops import box_convert, generalized_box_iou
 
 CORE_LOSS_KEY = "loss"
 LOSS_VERSION = "transformers-hungarian-v1"
+SEMANTIC_LOSS_VERSION = "transformers-semantic-presence-v1"
+KNOWN_DISEASE_LOSS_VERSION = "transformers-known-disease-mask-v1"
 
 
 def dice_loss(logits, targets):
@@ -30,6 +32,58 @@ def focal_loss(logits, targets, alpha=0.25, gamma=2.0):
     pt = probability * targets + (1 - probability) * (1 - targets)
     weight = alpha * targets + (1 - alpha) * (1 - targets)
     return bce * (1 - pt).pow(gamma) * weight
+
+
+class SemanticPlantSegCriterion(torch.nn.Module):
+    """Prompt-conditioned semantic supervision without instance assignment."""
+
+    weights = {"presence": 1.0, "semantic_bce": 5.0, "semantic_dice": 5.0}
+
+    def forward(self, output, targets):
+        with torch.autocast(output.semantic_seg.device.type, enabled=False):
+            expected = torch.stack([target["semantic_mask"] for target in targets])
+            logits = F.interpolate(
+                output.semantic_seg.float(),
+                expected.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+            present = (expected.flatten(1).amax(1) > 0).float()
+            losses = {
+                "presence": F.binary_cross_entropy_with_logits(
+                    output.presence_logits.float().reshape(-1), present
+                ),
+                "semantic_bce": F.binary_cross_entropy_with_logits(logits, expected),
+                "semantic_dice": dice_loss(logits, expected).mean(),
+            }
+            losses[CORE_LOSS_KEY] = sum(
+                losses[name] * weight for name, weight in self.weights.items()
+            )
+        return losses
+
+
+class KnownDiseaseCriterion(torch.nn.Module):
+    """Segment the supplied disease; no query, box, or disease-presence objective."""
+
+    weights = {"semantic_bce": 5.0, "semantic_dice": 5.0}
+
+    def forward(self, output, targets):
+        with torch.autocast(output.semantic_seg.device.type, enabled=False):
+            expected = torch.stack([target["semantic_mask"] for target in targets])
+            logits = F.interpolate(
+                output.semantic_seg.float(),
+                expected.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+            losses = {
+                "semantic_bce": F.binary_cross_entropy_with_logits(logits, expected),
+                "semantic_dice": dice_loss(logits, expected).mean(),
+            }
+            losses[CORE_LOSS_KEY] = sum(
+                losses[name] * weight for name, weight in self.weights.items()
+            )
+        return losses
 
 
 class PlantSegCriterion(torch.nn.Module):
@@ -86,15 +140,21 @@ class PlantSegCriterion(torch.nn.Module):
             values = {name: [] for name in self.weights}
             for batch_index, target in enumerate(targets):
                 shape = target["semantic_mask"].shape[-2:]
-                masks = F.interpolate(
-                    output.pred_masks[batch_index].float()[:, None],
-                    shape,
-                    mode="bilinear",
-                    align_corners=False,
-                )[:, 0]
+                raw_masks = output.pred_masks[batch_index].float()
                 boxes = output.pred_boxes[batch_index].float()
                 logits = output.pred_logits[batch_index].float()
-                rows, columns = self.match(masks.detach(), boxes.detach(), logits.detach(), target)
+                # Assignment needs all queries but no autograd graph. Empty
+                # prompts need no mask resizing or CPU assignment at all.
+                with torch.no_grad():
+                    matching_masks = (
+                        F.interpolate(
+                            raw_masks[:, None], shape, mode="bilinear", align_corners=False
+                        )[:, 0]
+                        if len(target["boxes"])
+                        else raw_masks
+                    )
+                    rows, columns = self.match(matching_masks, boxes, logits, target)
+                del matching_masks
                 query_target = torch.zeros_like(logits)
                 query_target[rows] = 1
                 values["query"].append(
@@ -106,8 +166,12 @@ class PlantSegCriterion(torch.nn.Module):
                         presence, presence.new_tensor(float(len(columns) > 0))
                     )
                 )
-                zero = (masks.sum() + boxes.sum()) * 0
                 if len(rows):
+                    # Only matched queries receive mask gradients. Avoid the
+                    # dense all-query interpolation backward and its buffers.
+                    masks = F.interpolate(
+                        raw_masks[rows, None], shape, mode="bilinear", align_corners=False
+                    )[:, 0]
                     gt_masks = target["masks"][columns]
                     values["bbox"].append(
                         F.l1_loss(
@@ -123,11 +187,10 @@ class PlantSegCriterion(torch.nn.Module):
                             1 - generalized_box_iou(boxes[rows], target["boxes"][columns]).diag()
                         ).mean()
                     )
-                    values["mask_bce"].append(
-                        F.binary_cross_entropy_with_logits(masks[rows], gt_masks)
-                    )
-                    values["mask_dice"].append(dice_loss(masks[rows], gt_masks).mean())
+                    values["mask_bce"].append(F.binary_cross_entropy_with_logits(masks, gt_masks))
+                    values["mask_dice"].append(dice_loss(masks, gt_masks).mean())
                 else:
+                    zero = (raw_masks.sum() + boxes.sum()) * 0
                     for name in ("bbox", "giou", "mask_bce", "mask_dice"):
                         values[name].append(zero)
                 semantic = F.interpolate(
