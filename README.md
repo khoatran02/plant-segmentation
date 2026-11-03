@@ -49,6 +49,61 @@ không thay cho metric validation của protocol mask-only mới. Launcher run n
 `scripts/train_kaggle_fast.sh` cũng dùng protocol known-disease này, gồm cả baseline
 validation trước fine-tune.
 
+### Test toàn bộ tập test: mIoU và mAcc
+
+Launcher sau chạy toàn bộ split `test`, cung cấp lớp bệnh đúng cho từng ảnh,
+dùng semantic mask và không lọc theo confidence phân lớp. Trong Kaggle notebook:
+
+```bash
+!CHECKPOINT=/kaggle/input/datasets/duyhoang29/plant-sam3-weight/last.pt \
+  OUTPUT_DIR=/kaggle/working/plantseg_sam3_known_disease_test \
+  bash scripts/test_kaggle_known_disease.sh
+```
+
+Để test model sau lượt training mới, đặt `CHECKPOINT` thành
+`/kaggle/working/plantseg_sam3_known_disease_672_lr1e4_s1105/best.pt`.
+`DATASET_DIR` mặc định là
+`/kaggle/input/datasets/duyhoang29/plantseg/plantseg`; có thể truyền biến môi
+trường để đổi đường dẫn. Launcher dùng 2 GPU, ảnh 672, mask threshold 0,5;
+`NPROC_PER_NODE=1` cho một GPU. Dùng threshold đã chốt trên validation.
+
+Các file được lưu trong `OUTPUT_DIR`:
+
+| File | Nội dung |
+|---|---|
+| `summary.json` | mIoU, mAcc thang 0–1 và phần trăm, số ảnh, checkpoint, protocol |
+| `test.json` | Toàn bộ metric và cấu hình đánh giá |
+| `test-per-class.csv` | IoU, accuracy và support pixel từng lớp |
+| `test-per-image.csv` | IoU/Dice foreground và TP/FP/FN từng ảnh |
+| `test-confusion.npy` | Ma trận nhầm lẫn pixel của toàn bộ test split |
+| `predictions/` | Mask PNG class-index ở kích thước ảnh gốc |
+| `evaluation.log` | Log đánh giá |
+
+`mIoU` và `mAcc` đều là macro theo lớp bệnh, bỏ nền. Với mỗi lớp, gộp pixel
+trên toàn bộ tập test rồi tính `IoU = TP/(TP+FP+FN)` và
+`Acc = TP/(TP+FN)` trước khi lấy trung bình theo lớp. mAcc ở đây là mean pixel
+accuracy theo lớp, không phải accuracy phân loại tên bệnh. Không lấy trung bình
+IoU từng ảnh để thay cho mIoU.
+
+Trên máy local macOS/Apple Silicon, chạy từ thư mục gốc dự án với cache model đã tải:
+
+```bash
+.venv/bin/python evaluate.py \
+  --dataset_dir datasets/plantseg --split test \
+  --resume outputs/last.pt --known_disease --image_size 672 \
+  --device mps --amp off \
+  --cache_dir outputs/hf-cache --local_files_only \
+  --save_predictions outputs/known-disease-test/predictions \
+  --output_dir outputs/known-disease-test
+```
+
+Lệnh local lưu `miou` và `macc` trong `outputs/known-disease-test/test.json`,
+cùng CSV từng lớp/từng ảnh, ma trận nhầm lẫn và mask PNG. Metric JSON ở thang 0–1.
+Dùng `--device cpu` nếu không có MPS, hoặc `--device auto` để chọn CUDA/MPS/CPU.
+CPU/MPS chạy FP32 (`--amp off`); chế độ auto cũng chọn FP32 cho hai thiết bị này.
+Không cần `torchrun` khi chạy MPS. Evaluator đọc được checkpoint có `Path` được
+lưu bởi Python 3.13 khi máy local dùng Python 3.12.
+
 ## Cài đặt trên Kaggle 2 × T4
 
 Toàn bộ dependencies cho train, evaluate, test và lint được gộp trong một file `requirements.txt`.
@@ -165,6 +220,29 @@ python train.py --prepare_only \
 ```
 
 Cache có fingerprint gồm đường dẫn dataset, nội dung metadata, tên/kích thước/mtime file, nguồn annotation và chính sách nhãn. Fingerprint phục vụ phát hiện thay đổi và tránh dùng nhầm cache; không phải kiểm toán hash nội dung từng ảnh. `--rebuild_annotations` tạo lại cache.
+
+## Vẽ phân bố độ phân giải và tỷ lệ mask
+
+Hai biểu đồ thống kê dữ liệu được tính trực tiếp từ ảnh và PNG ground truth,
+không cần checkpoint hoặc GPU:
+
+```bash
+.venv/bin/python -m src.dataset_statistics \
+  --dataset_dir datasets/plantseg \
+  --output_dir outputs/dataset-statistics
+```
+
+Mặc định gộp `train`, `val`, `test`; thêm `--splits test` nếu chỉ thống kê tập test.
+Độ phân giải dùng kích thước gốc sau sửa hướng EXIF. Tỷ lệ mask là
+`100 × số pixel PNG > 0 / tổng số pixel`, tính riêng từng ảnh; histogram có 100
+khoảng rộng 1%, khoảng cuối bao gồm 100%. Đây là mask nhãn gốc, không phải mask
+model dự đoán hoặc metric đánh giá model.
+
+Kết quả gồm `image-resolutions.png`, `mask-ratios.png`, bản vector `.svg`, ảnh gộp
+`distributions.png`, `per-image.csv`, `mask-ratio-histogram.csv` và `summary.json`.
+Biểu đồ độ phân giải dùng thang log cho cả hai trục. Chỉ vẽ PlantSeg vì project
+chưa có PlantDoc/PlantVillage; số đếm phụ thuộc phiên bản dữ liệu đang có nên
+không nhất thiết trùng biểu đồ trong bài báo. Cài `requirements.txt` để có Matplotlib.
 
 ## Lệnh training tương tự mẫu torchrun
 

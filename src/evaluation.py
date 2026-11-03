@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import time
 from pathlib import Path
+
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import numpy as np
 import torch
@@ -314,7 +317,8 @@ def main():
     parser.add_argument("--save_predictions", type=Path)
     parser.add_argument("--score_threshold", type=float, default=0.5)
     parser.add_argument("--mask_threshold", type=float, default=0.5)
-    parser.add_argument("--amp", choices=("auto", "fp16", "bf16", "off"), default="fp16")
+    parser.add_argument("--amp", choices=("auto", "fp16", "bf16", "off"))
+    parser.add_argument("--device", choices=("auto", "cuda", "mps", "cpu"), default="auto")
     parser.add_argument("--limit_val", type=int)
     parser.add_argument("--limit_test", type=int)
     parser.add_argument("--eval_prompt_batch_size", type=int, default=1)
@@ -341,7 +345,31 @@ def main():
         parser.error("--eval_mode external requires --prediction_dir")
     if args.prediction_dir is not None and args.resume is not None:
         parser.error("--prediction_dir and --resume are mutually exclusive")
-    device = setup("cpu" if args.prediction_dir else "cuda")
+    device_name = args.device
+    if args.prediction_dir is not None:
+        device_name = "cpu"
+    elif device_name == "auto":
+        device_name = (
+            "cuda"
+            if torch.cuda.is_available()
+            else "mps"
+            if torch.backends.mps.is_available()
+            else "cpu"
+        )
+    if device_name == "mps":
+        if not torch.backends.mps.is_available():
+            parser.error("MPS is unavailable; use --device cpu or --device auto")
+        if int(os.environ.get("WORLD_SIZE", 1)) > 1:
+            parser.error(
+                "MPS evaluation uses one process; run with python, not distributed torchrun"
+            )
+    if args.amp is None or (args.amp == "auto" and device_name != "cuda"):
+        args.amp = "fp16" if device_name == "cuda" else "off"
+    if device_name in ("mps", "cpu") and args.amp != "off":
+        parser.error("CPU/MPS evaluation uses FP32; pass --amp off")
+    device = setup(device_name)
+    if device.type != "cuda":
+        torch.set_num_threads(min(4, os.cpu_count() or 1))
     try:
         model, dtype = None, None
         if args.prediction_dir is not None:

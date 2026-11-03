@@ -1,11 +1,13 @@
+import csv
 import json
 
 import numpy as np
 import pytest
 import torch
+from PIL import Image
 
-from src.data import categories_from_metadata, load_metadata
-from src.evaluation import Sam3SemanticPredictor
+from src.data import categories_from_metadata, load_metadata, load_pair, split_samples
+from src.evaluation import Sam3SemanticPredictor, evaluate
 from src.losses import KNOWN_DISEASE_LOSS_VERSION, KnownDiseaseCriterion
 from src.runtime import load_adaptation, rng_state
 from src.sam3_adapter import forward_model
@@ -129,7 +131,7 @@ def test_known_disease_mask_ignores_confidence_but_keeps_spatial_threshold(
         handle.remove()
 
 
-def test_known_disease_run_initializes_old_checkpoint_and_saves_matching_validation(
+def test_known_disease_run_initializes_old_checkpoint_and_saves_validation_and_test_results(
     tiny_dataset, tiny_model_dir, tmp_path, monkeypatch
 ):
     args = known_args(tiny_dataset, tiny_model_dir, tmp_path)
@@ -176,6 +178,41 @@ def test_known_disease_run_initializes_old_checkpoint_and_saves_matching_validat
     assert saved["model_identity"]["loss_version"] == KNOWN_DISEASE_LOSS_VERSION
     weight = "mask_decoder.semantic_projection.weight"
     assert not torch.equal(saved["trainable"][weight], original.state_dict()[weight])
+
+    # Evaluate the saved model over the entire test split, then independently
+    # reconstruct the class confusion matrix from the PNGs that were exported.
+    args.resume = args.output_dir / "best.pt"
+    args.limit_test = None
+    args.save_predictions = args.output_dir / "test-predictions"
+    result = evaluate(restored, args, "test", torch.device("cpu"), None, args.output_dir / "test")
+    samples = split_samples(tiny_dataset, "test")
+    assert result["num_images"] == len(samples) == 3
+    assert result["limited"] is False and result["known_disease"] is True
+    assert result["confidence_filtering"] is False
+    count = len(restored._plantseg_text_hidden) + 1
+    confusion = np.zeros((count, count), dtype=np.int64)
+    for sample in samples:
+        _, target = load_pair(sample, args.label_policy)
+        with Image.open(args.save_predictions / sample["mask_path"].name) as source:
+            prediction = np.array(source)
+        assert prediction.shape == target.shape
+        assert set(np.unique(prediction)) <= {0, int(target.max())}
+        confusion += np.bincount(
+            (target.astype(np.int64) * count + prediction).ravel(), minlength=count**2
+        ).reshape(count, count)
+    np.testing.assert_array_equal(np.load(args.output_dir / "test-confusion.npy"), confusion)
+    true_positive = np.diag(confusion)[1:]
+    support = confusion.sum(1)[1:]
+    union = (confusion.sum(0) + confusion.sum(1))[1:] - true_positive
+    expected_miou = np.mean(true_positive[union > 0] / union[union > 0])
+    expected_macc = np.mean(true_positive[support > 0] / support[support > 0])
+    persisted = json.loads((args.output_dir / "test.json").read_text())
+    assert persisted["miou"] == pytest.approx(expected_miou)
+    assert persisted["macc"] == pytest.approx(expected_macc)
+    for suffix, rows in (("per-image", len(samples)), ("per-class", count)):
+        with (args.output_dir / f"test-{suffix}.csv").open(newline="") as stream:
+            assert len(list(csv.DictReader(stream))) == rows
+
     saved["config"]["known_disease"] = False
     inconsistent = tmp_path / "inconsistent.pt"
     torch.save(saved, inconsistent)

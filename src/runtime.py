@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pickle
 import random
 from datetime import timedelta
 from pathlib import Path
+from types import ModuleType
 
 import numpy as np
 import torch
@@ -133,10 +135,26 @@ def lr_factor(step: int, total: int, warmup: int) -> float:
     return 0.5 * (1 + math.cos(math.pi * progress))
 
 
+class _CheckpointUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        # Python 3.13 moved Path classes into pathlib._local. Resolve them
+        # through pathlib's public exports when reading on Python 3.12 too.
+        if module == "pathlib._local":
+            module = "pathlib"
+        return super().find_class(module, name)
+
+
+def read_checkpoint(path):
+    compatible_pickle = ModuleType("pickle")
+    compatible_pickle.__dict__.update(vars(pickle))
+    compatible_pickle.Unpickler = _CheckpointUnpickler
+    return torch.load(path, map_location="cpu", weights_only=False, pickle_module=compatible_pickle)
+
+
 def load_adaptation(
     model, path: Path, expected_args=None, *, allow_resolution_change=False, allow_loss_change=False
 ):
-    state = torch.load(path, map_location="cpu", weights_only=False)
+    state = read_checkpoint(path)
     if "trainable" not in state:
         raise ValueError(
             f"{path} is not an adaptation checkpoint; use --model_id for pretrained SAM3"

@@ -1,0 +1,37 @@
+[
+  {
+    "file": "01_apple_rust.jpg",
+    "prompt": "apple rust",
+    "title": "Vùng bệnh gỉ sắt trên lá táo",
+    "source_split": "test",
+    "source_name": "apple_rust_google_0201.jpg"
+  },
+  {
+    "file": "02_bean_mosaic_virus.jpg",
+    "prompt": "bean mosaic virus",
+    "title": "Vùng biểu hiện bệnh khảm trên lá đậu",
+    "source_split": "test",
+    "source_name": "bean_mosaic_virus_google_0069.jpg"
+  },
+  {
+    "file": "03_corn_smut.jpg",
+    "prompt": "corn smut",
+    "title": "Vùng bệnh than đen trên ngô",
+    "source_split": "test",
+    "source_name": "corn_smut_google_0063.jpg"
+  },
+  {
+    "file": "04_blueberry_rust.jpg",
+    "prompt": "blueberry rust",
+    "title": "Vùng bệnh gỉ sắt trên lá việt quất",
+    "source_split": "test",
+    "source_name": "blueberry_rust_google_0016.jpg"
+  },
+  {
+    "file": "05_squash_powdery_mildew.jpg",
+    "prompt": "squash powdery mildew",
+    "title": "Vùng bệnh phấn trắng trên lá bí",
+    "source_split": "test",
+    "source_name": "squash_powdery_mildew_50.jpg"
+  }
+]

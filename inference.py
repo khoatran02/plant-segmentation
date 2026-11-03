@@ -5,9 +5,7 @@ from __future__ import annotations
 import argparse
 import gc
 import os
-import pathlib
 import random
-import sys
 import time
 from pathlib import Path
 
@@ -26,25 +24,13 @@ from src.data import (
 )
 from src.evaluation import Sam3SemanticPredictor
 from src.metrics import SegmentationMetrics
-from src.runtime import file_sha256, write_json
+from src.runtime import file_sha256, read_checkpoint, write_json
 from src.sam3_adapter import (
     build_model,
     cache_text_features,
     configure_semantic_only,
     configure_trainable,
 )
-
-
-def read_checkpoint(path):
-    # Python 3.13 pickles Path under pathlib._local; Python 3.12 uses pathlib.
-    alias = sys.version_info < (3, 13) and "pathlib._local" not in sys.modules
-    if alias:
-        sys.modules["pathlib._local"] = pathlib
-    try:
-        return torch.load(path, map_location="cpu", weights_only=False)
-    finally:
-        if alias:
-            del sys.modules["pathlib._local"]
 
 
 def overlay(image, mask, color):

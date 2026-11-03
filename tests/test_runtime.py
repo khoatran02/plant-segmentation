@@ -16,11 +16,28 @@ from src.runtime import (
     accumulation_window,
     load_adaptation,
     lr_factor,
+    read_checkpoint,
     restore_rng,
     rng_state,
     seed_everything,
 )
 from src.training import parse_args
+
+
+def test_checkpoint_from_python313_pathlib_loads_on_older_python(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    checkpoint = tmp_path / "python313.pt"
+    concrete_path = type(Path("example"))
+    legacy = ModuleType("pathlib._local")
+    setattr(legacy, concrete_path.__name__, concrete_path)
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "pathlib._local", legacy)
+        patch.setattr(concrete_path, "__module__", "pathlib._local")
+        torch.save({"path": Path("example"), "value": torch.tensor([3])}, checkpoint)
+    state = read_checkpoint(checkpoint)
+    assert state["path"] == Path("example")
+    torch.testing.assert_close(state["value"], torch.tensor([3]))
 
 
 def test_broken_native_dependency_fails_before_ddp_or_dataset_preparation(monkeypatch, tmp_path):
