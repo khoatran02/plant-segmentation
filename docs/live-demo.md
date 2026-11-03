@@ -31,6 +31,35 @@ model từ cache; thêm `--allow_download` nếu cần tải (cần quyền truy
 `facebook/sam3` và xác thực Hugging Face như README). Thiết bị tự chọn CUDA → MPS
 → CPU. Checkpoint adaptation không chứa toàn bộ base weights.
 
+## Khi thiếu checkpoint hoặc nạp model lỗi
+
+Server vẫn mở giao diện khi không tìm thấy file `--checkpoint` (mặc định là
+`outputs/best.pt`). Trang hiển thị **Chưa tìm thấy checkpoint**, tên file đang
+thiếu và khu vực **Chọn checkpoint đã fine-tune**.
+
+1. Chọn file `.pt`, `.pth` hoặc `.ckpt` được tạo bởi pipeline PlantSeg SAM 3
+   hiện tại, tối đa **4 GB**.
+2. Bấm **Tải lên và nạp model**. Thanh tiến độ cho biết tiến độ truyền file;
+   sau đó trang hiển thị **Đang nạp model**.
+3. Đợi trạng thái **Sẵn sàng** rồi chọn ảnh, prompt và bấm **Tạo mask**.
+
+Checkpoint được truyền trực tiếp và ghi theo từng khối vào
+`outputs/demo-checkpoints/`, dùng tên file riêng do server tạo, không ghi đè
+`outputs/best.pt`. Có thể đổi nơi lưu bằng `--checkpoint_upload_dir`. File vừa
+tải được dùng trong phiên server hiện tại; khi khởi động lại, truyền đường dẫn
+file đã lưu qua `--checkpoint` nếu muốn tiếp tục dùng file đó.
+
+Nếu file hỏng hoặc không tương thích, trang báo lỗi và cho phép chọn file khác.
+Demo không nhận thêm checkpoint khi đang tải, nạp model hoặc đã sẵn sàng.
+File tải lên được đọc bằng chế độ `weights_only=True`, hỗ trợ các kiểu Path và
+NumPy dùng trong checkpoint của project; không tự chuyển sang giải mã pickle
+không giới hạn khi gặp file lạ.
+
+Model nền SAM 3 vẫn cần có trong cache Hugging Face. Nếu thiếu cache, trang báo
+lỗi riêng và hướng dẫn chạy lại với `--allow_download`; tài khoản Hugging Face
+cần có quyền truy cập `facebook/sam3`. Chỉ tải adaptation checkpoint lên sẽ
+không thay thế các base weights này.
+
 ## Folder ảnh và prompt
 
 `demo-samples/` chứa đúng **5 ảnh JPG** từ PlantSeg test split, mỗi ảnh có file
@@ -108,7 +137,15 @@ run gốc để tái lập. Các identity còn lại và tập tham số adaptat
 ## API và kiểm tra
 
 `GET /api/status`, `GET /api/samples`, `GET /api/sample/{id}`,
-`GET /api/samples.zip`, `POST /api/predict`.
+`GET /api/samples.zip`, `POST /api/predict`, `POST /api/checkpoint`.
+
+Upload checkpoint dùng body nhị phân (`Content-Type: application/octet-stream`),
+`Content-Length` và header `X-Checkpoint-Name` chứa tên file mã hóa bằng
+`encodeURIComponent`. API trả `202` khi nhận đủ file và bắt đầu nạp model trong
+nền; kiểm tra `/api/status` để biết kết quả. Status có thêm
+`checkpoint_upload_allowed` và `max_checkpoint_bytes`; thiếu file được biểu diễn
+bằng trạng thái `missing_checkpoint`. Upload bị từ chối bằng `409` khi model
+đang bận/đã sẵn sàng, `413` nếu quá giới hạn và `415` nếu sai Content-Type.
 
 Predict nhận JSON chứa `prompt`, `threshold` và một trong `sample_id` hoặc
 `image` (base64 thuần). Ví dụ:
@@ -125,9 +162,14 @@ thay đổi pipeline train/evaluate.
 ```bash
 .venv/bin/python -m pytest tests/test_demo.py -q
 node --check demo/app.js
+node tests/test_demo_ui.cjs
 ```
 
 Test gồm upload/EXIF, prompt rỗng/quá dài, giới hạn token, nhãn mask nhị phân,
 khóa inference, giải phóng text cache, file ZIP và xác nhận hai prompt khác nhau
 được encode thành input IDs khác nhau qua text encoder của SAM 3 nhỏ thật.
+Kiểm thử checkpoint gồm giao diện vẫn mở khi thiếu file, giới hạn upload,
+file hỏng/tải gián đoạn, tải lại sau lỗi, đọc file an toàn và nạp checkpoint rồi
+chạy suy luận bằng SAM 3 nhỏ thật. Kiểm thử JavaScript kiểm tra trạng thái nút,
+tiến độ upload và phục hồi sau lỗi.
 

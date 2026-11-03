@@ -2,6 +2,7 @@
 const $ = id => document.getElementById(id);
 let model = null, selected = null, result = null, running = false;
 let selectionVersion = 0, readVersion = 0;
+let uploadingCheckpoint = false, statusTimer;
 const fmt = new Intl.NumberFormat('vi-VN');
 const PREDICTION_COLOR = [37, 99, 235];
 const PREDICTION_OPACITY = 0.65;
@@ -42,7 +43,7 @@ function message(text, error = false) {
   $('message').classList.toggle('error', error);
 }
 function updateRun() {
-  $('run').disabled = running || !selected || model?.status !== 'ready' || !$('prompt').value.trim();
+  $('run').disabled = running || uploadingCheckpoint || !selected || model?.status !== 'ready' || !$('prompt').value.trim();
   $('prompt-count').textContent = `${$('prompt').value.length} / 200`;
 }
 function clearResult() {
@@ -98,29 +99,106 @@ async function useFile(file) {
     setImage(source, { image: source.split(',')[1] }, file.name);
   } catch { message('Không đọc được ảnh. Vui lòng chọn một ảnh khác.', true); }
 }
+function renderModelStatus(next) {
+  const previousStatus = model?.status;
+  model = next;
+  const labels = {
+    ready: `Sẵn sàng · ${(model.device || '').toUpperCase()}`,
+    error: 'Lỗi nạp model', missing_checkpoint: 'Chưa có checkpoint',
+    uploading: 'Đang tải checkpoint', loading: 'Đang nạp model',
+  };
+  $('status').className = `status ${model.status}`;
+  $('status').lastElementChild.textContent = labels[model.status] || 'Chưa sẵn sàng';
+  const needsCheckpoint = model.checkpoint_upload_allowed;
+  $('checkpoint-panel').hidden = !(needsCheckpoint || uploadingCheckpoint || ['uploading', 'loading'].includes(model.status));
+  $('checkpoint-title').textContent = model.status === 'missing_checkpoint' ? 'Chưa tìm thấy checkpoint' :
+    needsCheckpoint ? 'Không nạp được model' : 'Đang chuẩn bị model';
+  $('checkpoint-reason').textContent = model.message;
+  $('checkpoint-file').disabled = uploadingCheckpoint || !needsCheckpoint;
+  $('checkpoint-submit').disabled = uploadingCheckpoint || !needsCheckpoint || !$('checkpoint-file').files.length;
+  if (model.status === 'ready') {
+    $('model-detail').textContent = `SAM 3 · ${model.input_size.join(' × ')} · ${model.checkpoint}`;
+    if (previousStatus !== 'ready' && !$('threshold').dataset.edited) {
+      $('threshold').value = model.mask_threshold;
+      $('threshold-value').value = Number(model.mask_threshold).toFixed(2);
+    }
+    if (previousStatus !== 'ready') {
+      message(selected ? 'Model sẵn sàng. Bấm “Tạo mask” để chạy.' : 'Model sẵn sàng. Chọn ảnh mẫu hoặc tải ảnh của bạn lên.');
+      $('checkpoint-feedback').hidden = true;
+      $('checkpoint-progress').hidden = true;
+    }
+  } else if (previousStatus !== model.status) {
+    message(model.message, needsCheckpoint);
+  }
+  updateRun();
+}
 async function pollStatus() {
+  clearTimeout(statusTimer);
   try {
     const response = await fetch('/api/status');
     if (!response.ok) throw new Error();
-    const previousStatus = model?.status;
-    model = await response.json();
-    $('status').className = `status ${model.status}`;
-    $('status').lastElementChild.textContent = model.status === 'ready' ? `Sẵn sàng · ${model.device.toUpperCase()}` : model.status === 'error' ? 'Lỗi nạp model' : 'Đang nạp model';
-    if (model.status === 'ready') {
-      $('model-detail').textContent = `SAM 3 · ${model.input_size.join(' × ')} · ${model.checkpoint}`;
-      if (previousStatus !== 'ready' && !$('threshold').dataset.edited) {
-        $('threshold').value = model.mask_threshold;
-        $('threshold-value').value = Number(model.mask_threshold).toFixed(2);
-      }
-      if (!selected) message('Model sẵn sàng. Chọn ảnh mẫu hoặc tải ảnh của bạn lên.');
-    } else if (model.status === 'error') message(model.message, true);
-    updateRun();
-    if (model.status === 'loading') setTimeout(pollStatus, 2000);
+    const next = await response.json();
+    if (!uploadingCheckpoint) renderModelStatus(next);
   } catch {
     $('status').className = 'status error';
     $('status').lastElementChild.textContent = 'Mất kết nối';
     model = null; updateRun(); message('Chưa kết nối được server. Kiểm tra terminal đang chạy demo.py.', true);
-    setTimeout(pollStatus, 5000);
+    $('checkpoint-file').disabled = true;
+    $('checkpoint-submit').disabled = true;
+  } finally {
+    statusTimer = setTimeout(pollStatus, ['loading', 'uploading'].includes(model?.status) ? 2000 : 5000);
+  }
+}
+function checkpointFeedback(text, error = false) {
+  $('checkpoint-feedback').textContent = text;
+  $('checkpoint-feedback').hidden = !text;
+  $('checkpoint-feedback').classList.toggle('error', error);
+}
+async function uploadCheckpoint(event) {
+  event.preventDefault();
+  const file = $('checkpoint-file').files[0];
+  if (!file || uploadingCheckpoint || !model?.checkpoint_upload_allowed) return;
+  if (!/\.(pt|pth|ckpt)$/i.test(file.name)) return checkpointFeedback('Hãy chọn checkpoint .pt, .pth hoặc .ckpt.', true);
+  if (!file.size || file.size > model.max_checkpoint_bytes) return checkpointFeedback('Checkpoint phải có dữ liệu và không vượt quá 4 GB.', true);
+  uploadingCheckpoint = true;
+  invalidate();
+  renderModelStatus(model);
+  $('checkpoint-progress').value = 0;
+  $('checkpoint-progress').hidden = false;
+  checkpointFeedback('Đang tải checkpoint… 0%');
+  try {
+    const state = await new Promise((resolve, reject) => {
+      const request = new XMLHttpRequest();
+      request.open('POST', '/api/checkpoint');
+      request.setRequestHeader('Content-Type', 'application/octet-stream');
+      request.setRequestHeader('X-Checkpoint-Name', encodeURIComponent(file.name));
+      request.upload.onprogress = progress => {
+        if (!progress.lengthComputable) return;
+        const percent = Math.round(progress.loaded / progress.total * 100);
+        $('checkpoint-progress').value = percent;
+        checkpointFeedback(percent < 100 ? `Đang tải checkpoint… ${percent}%` : 'Đã gửi checkpoint. Đang đợi server…');
+      };
+      request.onload = () => {
+        let data;
+        try { data = JSON.parse(request.responseText); }
+        catch { reject(new Error('Server trả về dữ liệu không hợp lệ.')); return; }
+        if (request.status !== 202) reject(new Error(data.error || 'Không tải được checkpoint.'));
+        else resolve(data);
+      };
+      request.onerror = () => reject(new Error('Mất kết nối khi tải checkpoint. Vui lòng thử lại.'));
+      request.onabort = () => reject(new Error('Đã hủy tải checkpoint.'));
+      request.send(file);
+    });
+    $('checkpoint-file').value = '';
+    checkpointFeedback('Đã tải checkpoint. Đang nạp model…');
+    renderModelStatus(state);
+  } catch (error) {
+    $('checkpoint-progress').hidden = true;
+    checkpointFeedback(error.message, true);
+  } finally {
+    uploadingCheckpoint = false;
+    if (model) renderModelStatus(model);
+    await pollStatus();
   }
 }
 async function loadSamples() {
@@ -194,4 +272,9 @@ $('prompt').oninput = invalidate;
 $('prompt').onkeydown = event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); run(); } };
 $('threshold').oninput = () => { $('threshold').dataset.edited = 'true'; $('threshold-value').value = Number($('threshold').value).toFixed(2); invalidate(); };
 $('run').onclick = run;
+$('checkpoint-form').onsubmit = uploadCheckpoint;
+$('checkpoint-file').onchange = () => {
+  checkpointFeedback('');
+  if (model) renderModelStatus(model);
+};
 pollStatus(); loadSamples(); renderView();

@@ -11,17 +11,20 @@ import json
 import logging
 import math
 import os
+import pathlib
+import tempfile
 import threading
 import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import numpy as np
 import torch
+from numpy._core.multiarray import _reconstruct
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from src.data import DEFAULT_DATASET_DIR
@@ -35,6 +38,8 @@ from src.sam3_adapter import (
 
 ROOT = Path(__file__).resolve().parent
 MAX_UPLOAD = 12 * 1024 * 1024
+MAX_CHECKPOINT_UPLOAD = 4 * 1024 * 1024 * 1024
+CHECKPOINT_EXTENSIONS = {".pt", ".pth", ".ckpt"}
 MAX_PIXELS = 20_000_000
 MAX_PROMPT_LENGTH = 200
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
@@ -43,6 +48,18 @@ LOG = logging.getLogger("plantseg.demo")
 
 class RequestError(ValueError):
     pass
+
+
+def read_uploaded_checkpoint(path):
+    """Read project checkpoints without executing arbitrary uploaded pickle globals."""
+    allowed = [np.ndarray, np.dtype, type(np.dtype(np.uint32)), _reconstruct,
+               (_reconstruct, "numpy.core.multiarray._reconstruct")]
+    # Checkpoints saved with Python 3.13 use pathlib._local; Kaggle uses PosixPath.
+    for name in ("PosixPath", "WindowsPath", "PurePosixPath", "PureWindowsPath"):
+        cls = pathlib.PurePath if name.startswith("Pure") else pathlib.Path
+        allowed.extend((cls, f"{module}.{name}") for module in ("pathlib", "pathlib._local"))
+    with torch.serialization.safe_globals(allowed):
+        return torch.load(path, map_location="cpu", weights_only=True)
 
 
 def validate_prompt(value):
@@ -139,15 +156,37 @@ class Demo:
         self.state = {"status": "loading", "message": "Đang nạp SAM 3 và checkpoint…",
                       "checkpoint": args.checkpoint.name}
         self.predictor = None
+        self.uploaded_checkpoint = False
+        if not args.checkpoint.is_file():
+            self.missing_checkpoint()
+
+    def missing_checkpoint(self):
+        with self.state_lock:
+            self.state.update(status="missing_checkpoint", message=(
+                f"Không tìm thấy checkpoint {self.args.checkpoint.name}. "
+                "Hãy tải checkpoint đã fine-tune lên để sử dụng demo."))
 
     def status(self):
         with self.state_lock:
-            return {**self.state, "prompt_mode": "free_text", "max_prompt_length": MAX_PROMPT_LENGTH}
+            return {**self.state, "prompt_mode": "free_text", "max_prompt_length": MAX_PROMPT_LENGTH,
+                    "checkpoint_upload_allowed": self.state["status"] in {"missing_checkpoint", "error"},
+                    "max_checkpoint_bytes": MAX_CHECKPOINT_UPLOAD}
 
     def load(self):
+        with self.lock:
+            self._load()
+
+    def _load(self):
+        if not self.args.checkpoint.is_file():
+            self.missing_checkpoint()
+            return
+        stage = "checkpoint"
         try:
+            with self.state_lock:
+                self.state.update(status="loading", message="Đang nạp SAM 3 và checkpoint…")
             torch.set_num_threads(min(4, os.cpu_count() or 1))
-            state = read_checkpoint(self.args.checkpoint)
+            reader = read_uploaded_checkpoint if self.uploaded_checkpoint else read_checkpoint
+            state = reader(self.args.checkpoint)
             config, identity = state["config"], state["model_identity"]
             adaptation = state["trainable"]
             size = state.get("input_image_size")
@@ -163,7 +202,9 @@ class Demo:
                 seed=config.get("seed", 1105), dataset_dir=self.args.dataset_dir,
                 loss_mode=config.get("loss_mode", "combined"), known_disease=known,
             )
+            stage = "base_model"
             model = build_model(args)
+            stage = "checkpoint"
             saved, current = dict(identity), dict(model._plantseg_identity)
             # Legacy checkpoints record 'main'; mirror inference.py's compatibility policy.
             if saved["resolved_revision"] == "main":
@@ -183,6 +224,7 @@ class Demo:
             mask_source = "semantic" if known else config.get("eval_mask_source", "instance")
             if mask_source == "semantic":
                 configure_semantic_only(model)
+            stage = "device"
             device = self.args.device
             if device == "auto":
                 device = "cuda" if torch.cuda.is_available() else (
@@ -204,10 +246,66 @@ class Demo:
             LOG.info("Model ready on %s, checkpoint=%s", device, self.args.checkpoint)
         except Exception:
             LOG.exception("Could not load model")
+            self.predictor = None
+            messages = {
+                "checkpoint": "Checkpoint không hợp lệ hoặc không tương thích với demo PlantSeg SAM 3. "
+                              "Hãy chọn checkpoint khác được tạo bởi pipeline hiện tại.",
+                "base_model": "Không nạp được model nền SAM 3. Kiểm tra cache Hugging Face và log terminal. "
+                              "Nếu chưa có cache, chạy lại demo với --allow_download "
+                              "và tài khoản Hugging Face có quyền truy cập model.",
+                "device": "Không đưa được model lên thiết bị xử lý. Kiểm tra bộ nhớ và log terminal; "
+                          "có thể chạy lại với --device cpu.",
+            }
             with self.state_lock:
-                self.state.update(status="error", message=(
-                    "Không nạp được model. Kiểm tra checkpoint, cache Hugging Face và log terminal. "
-                    "Nếu chưa có cache, chạy lại với --allow_download."))
+                self.state.update(status="error", message=messages[stage])
+
+    def upload_checkpoint(self, stream, length, filename):
+        # Never use a browser-supplied filename as a filesystem path.
+        filename = filename.replace("\\", "/").rsplit("/", 1)[-1]
+        suffix = Path(filename).suffix.lower()
+        if suffix not in CHECKPOINT_EXTENSIONS or len(filename) > 255:
+            raise RequestError("Hãy chọn checkpoint .pt, .pth hoặc .ckpt.")
+        if not 0 < length <= MAX_CHECKPOINT_UPLOAD:
+            raise RequestError("Checkpoint phải có dữ liệu và không vượt quá 4 GB.")
+        if not self.lock.acquire(blocking=False):
+            return 409, {"error": "Model đang bận. Vui lòng đợi rồi thử lại."}
+        temporary = None
+        try:
+            if not self.status()["checkpoint_upload_allowed"]:
+                return 409, {"error": "Chỉ tải checkpoint khi model bị thiếu hoặc nạp lỗi."}
+            with self.state_lock:
+                self.state.update(status="uploading", message="Đang nhận checkpoint…")
+            directory = getattr(self.args, "checkpoint_upload_dir", ROOT / "outputs/demo-checkpoints")
+            directory.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=directory, prefix="checkpoint-", suffix=suffix,
+                                             delete=False) as target:
+                temporary = Path(target.name)
+                remaining = length
+                while remaining:
+                    chunk = stream.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise RequestError("Tải checkpoint bị gián đoạn. Vui lòng thử lại.")
+                    target.write(chunk)
+                    remaining -= len(chunk)
+            previous = self.args.checkpoint if self.uploaded_checkpoint else None
+            self.args.checkpoint = temporary
+            self.uploaded_checkpoint = True
+            with self.state_lock:
+                self.state = {"status": "loading", "message": "Đã tải checkpoint. Đang nạp model…",
+                              "checkpoint": filename}
+            if previous:
+                previous.unlink(missing_ok=True)
+            # Start after receiving the whole file. load() waits for this request's lock.
+            threading.Thread(target=self.load, daemon=True).start()
+            return 202, self.status()
+        except Exception:
+            if temporary:
+                temporary.unlink(missing_ok=True)
+            with self.state_lock:
+                self.state.update(status="error", message="Không tải được checkpoint. Vui lòng thử lại.")
+            raise
+        finally:
+            self.lock.release()
 
     def sample_list(self):
         return [{"id": i, "name": s["file"], "prompt": s["prompt"],
@@ -258,7 +356,7 @@ class Demo:
                          "width": image.width, "height": image.height, "pixels": pixels,
                          "coverage": pixels / (image.width * image.height), "seconds": seconds,
                          "prompt": prompt, "threshold": threshold,
-                         "checkpoint": self.args.checkpoint.name}
+                         "checkpoint": self.status()["checkpoint"]}
         finally:
             self.lock.release()
 
@@ -304,7 +402,8 @@ def make_handler(demo):
                 self.send(404, {"error": "Không tìm thấy nội dung."})
 
         def do_POST(self):
-            if urlsplit(self.path).path != "/api/predict":
+            path = urlsplit(self.path).path
+            if path not in {"/api/predict", "/api/checkpoint"}:
                 self.send(404, {"error": "Không tìm thấy API."})
                 return
             origin = self.headers.get("Origin")
@@ -313,6 +412,21 @@ def make_handler(demo):
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
+                if path == "/api/checkpoint":
+                    if not 0 < length <= MAX_CHECKPOINT_UPLOAD:
+                        self.close_connection = True
+                        self.send(413, {"error": "Checkpoint phải có dữ liệu và không vượt quá 4 GB."})
+                        return
+                    if self.headers.get("Content-Type") != "application/octet-stream":
+                        self.close_connection = True
+                        self.send(415, {"error": "Định dạng tải checkpoint không hợp lệ."})
+                        return
+                    self.connection.settimeout(120)
+                    self.close_connection = True
+                    code, result = demo.upload_checkpoint(
+                        self.rfile, length, unquote(self.headers.get("X-Checkpoint-Name", "")))
+                    self.send(code, result)
+                    return
                 if not 0 < length <= MAX_UPLOAD * 4 // 3 + 4096:
                     self.send(413, {"error": "Yêu cầu quá lớn hoặc không có ảnh (tối đa 12 MB)."})
                     return
@@ -322,12 +436,15 @@ def make_handler(demo):
                 self.send(code, result)
             except (RequestError, ValueError, UnicodeError) as error:
                 self.send(400, {"error": str(error) if isinstance(error, RequestError)
-                                 else "Dữ liệu JSON không hợp lệ."})
+                                 else "Thông tin tải checkpoint không hợp lệ."
+                                 if path == "/api/checkpoint" else "Dữ liệu JSON không hợp lệ."})
             except (BrokenPipeError, ConnectionResetError):
                 pass
             except Exception:
-                LOG.exception("Prediction failed")
-                self.send(500, {"error": "Không xử lý được ảnh. Xem log terminal và thử ảnh nhỏ hơn."})
+                LOG.exception("Demo request failed")
+                self.send(500, {"error": "Không tải được checkpoint. Kiểm tra dung lượng đĩa và log terminal."
+                           if path == "/api/checkpoint" else
+                           "Không xử lý được ảnh. Xem log terminal và thử ảnh nhỏ hơn."})
 
     return Handler
 
@@ -335,6 +452,8 @@ def make_handler(demo):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, default=ROOT / "outputs/best.pt")
+    parser.add_argument("--checkpoint_upload_dir", type=Path, default=ROOT / "outputs/demo-checkpoints",
+                        help="Directory for checkpoints uploaded from the demo")
     parser.add_argument("--dataset_dir", type=Path, default=DEFAULT_DATASET_DIR)
     parser.add_argument("--cache_dir", type=Path, default=ROOT / "outputs/hf-cache")
     parser.add_argument("--samples_dir", type=Path, default=ROOT / "demo-samples")
@@ -344,8 +463,6 @@ def main():
     parser.add_argument("--allow_download", action="store_true", help="Allow HF base-model downloads")
     args = parser.parse_args()
     args.local_files_only = not args.allow_download
-    if not args.checkpoint.is_file():
-        parser.error(f"Checkpoint not found: {args.checkpoint}")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     demo = Demo(args)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(demo))

@@ -8,3 +8,4 @@ outputs/
 *.egg-info/
 datasets/
 reports
+demo-samples-extra

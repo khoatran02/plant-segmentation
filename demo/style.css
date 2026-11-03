@@ -142,6 +142,54 @@ svg {
 .status.error i {
   background:var(--accent)
 }
+.status.missing_checkpoint {
+  background:#fff5e5;
+  color:#855c25;
+  border-color:#ead9ba
+}
+.status.missing_checkpoint i,.status.uploading i {
+  background:#b58b3d
+}
+.checkpoint-panel {
+  border:1px solid #ead9ba;
+  border-radius:12px;
+  padding:22px;
+  margin-bottom:24px;
+  background:#fffaf0;
+}
+.checkpoint-panel h2 {
+  margin:0 0 8px;
+  font-size:17px;
+}
+.checkpoint-panel p {
+  overflow-wrap:anywhere;
+}
+.checkpoint-controls {
+  display:flex;
+  align-items:center;
+  gap:14px;
+  flex-wrap:wrap;
+}
+.checkpoint-controls input {
+  min-width:0;
+  max-width:100%;
+}
+.checkpoint-controls button {
+  background:var(--green);
+  color:white;
+  border:0;
+  border-radius:8px;
+  padding:11px 16px;
+}
+.checkpoint-panel progress {
+  display:block;
+  width:100%;
+  margin-top:16px;
+  accent-color:var(--green);
+}
+#checkpoint-feedback.error {
+  color:#a14732;
+}
 main {
   max-width:1420px;
   padding:0 5%;

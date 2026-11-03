@@ -27,6 +27,21 @@
       <h1>Text-Prompted Plant Disease Lesion Segmentation with SAM 3 on PlantSeg</h1>
     </section>
 
+    <section id="checkpoint-panel" class="checkpoint-panel" aria-labelledby="checkpoint-title" hidden>
+      <h2 id="checkpoint-title">Chưa có model để phân đoạn</h2>
+      <p id="checkpoint-reason" role="status" aria-live="polite"></p>
+      <form id="checkpoint-form">
+        <label class="field-label" for="checkpoint-file">Chọn checkpoint đã fine-tune</label>
+        <div class="checkpoint-controls">
+          <input id="checkpoint-file" type="file" accept=".pt,.pth,.ckpt" aria-describedby="checkpoint-help" required>
+          <button id="checkpoint-submit" type="submit">Tải lên và nạp model</button>
+        </div>
+        <p id="checkpoint-help" class="helper">File .pt, .pth hoặc .ckpt từ pipeline PlantSeg SAM 3 · Tối đa 4 GB.</p>
+      </form>
+      <progress id="checkpoint-progress" max="100" value="0" aria-label="Tiến độ tải checkpoint" hidden></progress>
+      <p id="checkpoint-feedback" role="status" aria-live="polite" hidden></p>
+    </section>
+
     <section class="sample-section" aria-labelledby="sample-heading">
       <div class="sample-heading"><div><h2 id="sample-heading">Bắt đầu với một ảnh mẫu</h2><p>Bấm vào thẻ để điền sẵn ảnh và prompt. Bạn có thể sửa prompt trước khi chạy.</p></div><a class="sample-download" href="/api/samples.zip" download="plantseg-demo-samples.zip"><svg><use href="#download"/></svg>Tải 5 ảnh + prompt (.zip)</a></div>
       <div id="samples" class="samples" aria-label="5 cặp ảnh và text prompt mẫu"></div>
@@ -55,7 +70,7 @@
         <div id="viewer" class="viewer">
           <div id="empty" class="empty"><div class="empty-icon"><svg><use href="#leaf"/></svg><span>+</span></div><h3>Ảnh + text prompt → mask</h3><p>Chọn một ảnh mẫu ở trên để thử ngay,<br>hoặc tải ảnh và nhập mô tả của bạn.</p><div class="empty-steps"><span>01 &nbsp; Chọn ảnh</span><span>→</span><span>02 &nbsp; Nhập prompt</span><span>→</span><span>03 &nbsp; Tạo mask</span></div></div>
           <div id="image-grid" class="image-grid" hidden>
-            <section class="image-card" aria-labelledby="original-title"><div class="image-card-header"><h3 id="original-title">image original</h3></div><div class="image-frame"><img id="original" alt="image original"></div></section>
+            <section class="image-card" aria-labelledby="original-title"><div class="image-card-header"><h3 id="original-title">Original</h3></div><div class="image-frame"><img id="original" alt="image original"></div></section>
             <section class="image-card" aria-labelledby="prediction-title">
               <div class="image-card-header"><h3 id="prediction-title">Predict</h3><a id="download-overlay" class="download disabled" aria-disabled="true" aria-label="Tải ảnh dự đoán" download="plantseg-overlay.png"><svg><use href="#download"/></svg></a></div>
               <div class="image-frame"><img id="overlay" alt="Dự đoán phủ lên ảnh gốc" hidden><span id="prediction-empty" class="panel-placeholder" role="status">Chưa có kết quả</span></div>
