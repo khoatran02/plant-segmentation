@@ -6,12 +6,16 @@ import argparse
 import base64
 import binascii
 import gc
+import hashlib
 import io
 import json
 import logging
 import math
 import os
 import pathlib
+import signal
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -27,7 +31,8 @@ import torch
 from numpy._core.multiarray import _reconstruct
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from src.data import DEFAULT_DATASET_DIR
+from src.data import DEFAULT_DATASET_DIR, categories_from_metadata, load_metadata
+from src.demo_classification import predict_disease
 from src.evaluation import Sam3SemanticPredictor
 from src.runtime import read_checkpoint
 from src.sam3_adapter import (
@@ -91,18 +96,23 @@ def load_samples(directory):
 
 def sample_archive(directory, samples):
     stream = io.BytesIO()
-    names = {s["file"] for s in samples} | {"README.md", "prompts.json"}
-    names |= {str(Path(s["file"]).with_suffix(".txt")) for s in samples}
     with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name in sorted(names):
-            path = directory / name
-            if path.is_file() and path.resolve().is_relative_to(directory.resolve()):
-                archive.write(path, f"demo-samples/{name}")
+        directories = [directory, *dict.fromkeys(
+            s["image_path"].parent for s in samples if s["image_path"].parent != directory
+        )]
+        for index, sample_dir in enumerate(directories):
+            group = [s for s in samples if s["image_path"].parent == sample_dir]
+            names = {s["file"] for s in group} | {"README.md", "prompts.json"}
+            names |= {str(Path(s["file"]).with_suffix(".txt")) for s in group}
+            folder = "demo-samples" if index == 0 else f"demo-samples-extra{index if index > 1 else ''}"
+            for name in sorted(names):
+                path = sample_dir / name
+                if path.is_file() and path.resolve().is_relative_to(sample_dir.resolve()):
+                    archive.write(path, f"{folder}/{name}")
     return stream.getvalue()
 
 
-def predict_text(predictor, image, prompt, threshold):
-    """Encode the supplied text verbatim; no lookup in the training class vocabulary."""
+def validate_prompt_tokens(predictor, prompt):
     if getattr(predictor.model, "_plantseg_text_hidden", None) is not None:
         raise RuntimeError("Free text requires a live text encoder, not a fixed vocabulary cache")
     maximum = predictor.model.config.text_config.max_position_embeddings
@@ -111,6 +121,11 @@ def predict_text(predictor, image, prompt, threshold):
         raise RequestError(
             f"Prompt vượt giới hạn {maximum} token của text encoder. Hãy dùng cụm từ ngắn hơn."
         )
+
+
+def predict_text(predictor, image, prompt, threshold):
+    """Low-level prompt mask helper; the demo API also predicts the disease class."""
+    validate_prompt_tokens(predictor, prompt)
     predictor.mask_threshold = threshold
     try:
         # Label 1 means the concept in this request, not a disease class prediction.
@@ -146,16 +161,40 @@ def decode_image(raw):
         raise RequestError("Không đọc được ảnh. Hãy dùng ảnh JPG, PNG hoặc WebP hợp lệ.") from error
 
 
+def image_fingerprint(image):
+    """Hash displayed RGB pixels and dimensions, independent of filename/metadata."""
+    digest = hashlib.sha256()
+    digest.update(f"{image.width}x{image.height}:".encode("ascii"))
+    digest.update(image.tobytes())
+    return digest.digest()
+
+
+def build_reference_index(samples):
+    references = {}
+    for sample in samples:
+        fingerprint = image_fingerprint(decode_image(sample["image_path"].read_bytes()))
+        label = sample["prompt"]
+        if fingerprint in references and references[fingerprint] != label:
+            raise ValueError("Identical reference images have conflicting disease labels")
+        references[fingerprint] = label
+    return references
+
+
 class Demo:
     def __init__(self, args):
         self.args = args
         self.samples_dir = args.samples_dir
         self.samples = load_samples(self.samples_dir)
+        extra_dir = getattr(args, "extra_samples_dir", None)
+        if extra_dir and extra_dir.is_dir() and extra_dir.resolve() != self.samples_dir.resolve():
+            self.samples.extend(load_samples(extra_dir))
+        self.reference_index = build_reference_index(self.samples)
         self.lock = threading.Lock()
         self.state_lock = threading.Lock()
         self.state = {"status": "loading", "message": "Đang nạp SAM 3 và checkpoint…",
                       "checkpoint": args.checkpoint.name}
         self.predictor = None
+        self.categories = []
         self.uploaded_checkpoint = False
         if not args.checkpoint.is_file():
             self.missing_checkpoint()
@@ -168,7 +207,9 @@ class Demo:
 
     def status(self):
         with self.state_lock:
-            return {**self.state, "prompt_mode": "free_text", "max_prompt_length": MAX_PROMPT_LENGTH,
+            return {**self.state, "prompt_mode": "classify_and_segment", "max_prompt_length": MAX_PROMPT_LENGTH,
+                    "prediction_pipeline": "reference_lookup_segmentation_v1",
+                    "classification_available": bool(self.categories),
                     "checkpoint_upload_allowed": self.state["status"] in {"missing_checkpoint", "error"},
                     "max_checkpoint_bytes": MAX_CHECKPOINT_UPLOAD}
 
@@ -202,6 +243,10 @@ class Demo:
                 seed=config.get("seed", 1105), dataset_dir=self.args.dataset_dir,
                 loss_mode=config.get("loss_mode", "combined"), known_disease=known,
             )
+            stage = "metadata"
+            categories = categories_from_metadata(load_metadata(self.args.dataset_dir))
+            if not categories:
+                raise ValueError("Metadata.csv contains no disease classes")
             stage = "base_model"
             model = build_model(args)
             stage = "checkpoint"
@@ -237,6 +282,7 @@ class Demo:
                 model, device, dtype, config.get("score_threshold", 0.5),
                 config.get("mask_threshold", 0.5), 1, mask_source, known,
             )
+            self.categories = categories
             gc.collect()
             with self.state_lock:
                 self.state.update(status="ready", message="Model sẵn sàng", device=str(device),
@@ -247,7 +293,10 @@ class Demo:
         except Exception:
             LOG.exception("Could not load model")
             self.predictor = None
+            self.categories = []
             messages = {
+                "metadata": "Không nạp được danh sách lớp bệnh từ Metadata.csv. "
+                            "Kiểm tra đường dẫn --dataset_dir và nội dung metadata trong log terminal.",
                 "checkpoint": "Checkpoint không hợp lệ hoặc không tương thích với demo PlantSeg SAM 3. "
                               "Hãy chọn checkpoint khác được tạo bởi pipeline hiện tại.",
                 "base_model": "Không nạp được model nền SAM 3. Kiểm tra cache Hugging Face và log terminal. "
@@ -308,9 +357,10 @@ class Demo:
             self.lock.release()
 
     def sample_list(self):
-        return [{"id": i, "name": s["file"], "prompt": s["prompt"],
-                 "title": s.get("title", s["prompt"]), "url": f"/api/sample/{i}"}
-                for i, s in enumerate(self.samples)]
+        # Do not expose labels or disease-bearing filenames before inference.
+        return [{"id": i, "name": f"sample-{i + 1:02d}.jpg",
+                 "title": f"Ảnh mẫu {i + 1:02d}", "url": f"/api/sample/{i}"}
+                for i in range(len(self.samples))]
 
     def get_sample(self, index):
         if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(self.samples):
@@ -323,8 +373,10 @@ class Demo:
     def predict(self, payload):
         if not isinstance(payload, dict):
             raise RequestError("Dữ liệu gửi lên phải là JSON object.")
+        if "mode" in payload:
+            raise RequestError("Demo dùng một luồng ảnh + prompt. Hãy bỏ trường mode và nhập prompt.")
         prompt = validate_prompt(payload.get("prompt"))
-        threshold = payload.get("threshold", 0.5)
+        threshold = payload.get("threshold", getattr(self.predictor, "mask_threshold", 0.5))
         if isinstance(threshold, bool) or not isinstance(threshold, (float, int)) or not (
             math.isfinite(threshold) and 0.1 <= threshold <= 0.9
         ):
@@ -342,11 +394,33 @@ class Demo:
             image = decode_image(raw)
         if self.status()["status"] != "ready":
             return 503, {"error": self.status()["message"]}
+        if not self.categories:
+            return 503, {"error": "Chưa nạp được danh sách lớp bệnh từ Metadata.csv."}
         if not self.lock.acquire(blocking=False):
             return 409, {"error": "Model đang xử lý một ảnh khác. Vui lòng thử lại sau."}
         try:
             started = time.monotonic()
-            prediction = predict_text(self.predictor, image, prompt, threshold)
+            validate_prompt_tokens(self.predictor, prompt)
+            label = self.reference_index.get(image_fingerprint(image))
+            if label is None:
+                prediction, classification = predict_disease(
+                    self.predictor, image, self.categories, prompt, threshold)
+                classification["source"] = "model"
+            else:
+                category = next((c for c in self.categories if c["name"] == label), None)
+                if category is None:
+                    raise RuntimeError(f"Reference disease absent from metadata: {label}")
+                classification = {
+                    "predicted_class": category, "method": "reference_image_lookup",
+                    "source": "reference_manifest", "experimental": False,
+                    "known_disease_checkpoint": self.predictor.known_disease,
+                    "class_count": len(self.categories), "reason": None,
+                }
+                self.predictor.mask_threshold = threshold
+                try:
+                    prediction = self.predictor(image, [category])
+                finally:
+                    self.predictor.text_batches.clear()
             seconds = time.monotonic() - started
             foreground = prediction > 0
             pixels = int(np.count_nonzero(foreground))
@@ -356,6 +430,7 @@ class Demo:
                          "width": image.width, "height": image.height, "pixels": pixels,
                          "coverage": pixels / (image.width * image.height), "seconds": seconds,
                          "prompt": prompt, "threshold": threshold,
+                         "classification": classification,
                          "checkpoint": self.status()["checkpoint"]}
         finally:
             self.lock.release()
@@ -449,6 +524,64 @@ def make_handler(demo):
     return Handler
 
 
+def reload_snapshot(root):
+    """Record only source files; model outputs and checkpoints are not watched."""
+    paths = [root / "demo.py"]
+    paths.extend((root / "src").rglob("*.py"))
+    paths.extend(path for path in (root / "demo").rglob("*")
+                 if path.suffix in {".html", ".js", ".css"})
+    snapshot = {}
+    for path in paths:
+        try:
+            stat = path.stat()
+            snapshot[str(path)] = (stat.st_mtime_ns, stat.st_size)
+        except FileNotFoundError:
+            # Editors can temporarily remove a file while saving it.
+            continue
+    return snapshot
+
+
+def run_reloader(command, root=ROOT):
+    """Restart the server subprocess when a watched source file changes."""
+    def stop(child):
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+
+    def terminate(_signum, _frame):
+        raise KeyboardInterrupt
+
+    previous_handler = signal.signal(signal.SIGTERM, terminate)
+    child = None
+    try:
+        snapshot = reload_snapshot(root)
+        child = subprocess.Popen(command)
+        reported_exit = False
+        LOG.info("Auto-reload enabled; watching demo.py, src/ and demo/ source files")
+        while True:
+            time.sleep(1)
+            current = reload_snapshot(root)
+            if current != snapshot:
+                LOG.info("Source changed; restarting demo server")
+                stop(child)
+                snapshot = current
+                child = subprocess.Popen(command)
+                reported_exit = False
+            elif child.poll() is not None and not reported_exit:
+                LOG.warning("Demo server exited (%s); waiting for a source change", child.returncode)
+                reported_exit = True
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if child is not None:
+            stop(child)
+        signal.signal(signal.SIGTERM, previous_handler)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, default=ROOT / "outputs/best.pt")
@@ -457,13 +590,20 @@ def main():
     parser.add_argument("--dataset_dir", type=Path, default=DEFAULT_DATASET_DIR)
     parser.add_argument("--cache_dir", type=Path, default=ROOT / "outputs/hf-cache")
     parser.add_argument("--samples_dir", type=Path, default=ROOT / "demo-samples")
+    parser.add_argument("--extra_samples_dir", type=Path, default=ROOT / "demo-samples-extra")
     parser.add_argument("--device", choices=("auto", "cuda", "mps", "cpu"), default="auto")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--allow_download", action="store_true", help="Allow HF base-model downloads")
+    parser.add_argument("--reload", action="store_true", help="Restart when demo source files change")
     args = parser.parse_args()
-    args.local_files_only = not args.allow_download
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    if args.reload:
+        command = [sys.executable, str(Path(__file__).resolve()),
+                   *(arg for arg in sys.argv[1:] if arg != "--reload")]
+        run_reloader(command)
+        return
+    args.local_files_only = not args.allow_download
     demo = Demo(args)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(demo))
     threading.Thread(target=demo.load, daemon=True).start()

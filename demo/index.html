@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#183e32">
-  <meta name="description" content="Demo SAM 3 text-to-segment: chọn ảnh, nhập text prompt và tạo semantic mask với model fine-tuned trên PlantSeg.">
+  <meta name="description" content="Demo PlantSeg: tra cứu tên bệnh cho ảnh mẫu và phân đoạn vùng bệnh bằng SAM 3.">
   <title>Text-Prompted Plant Disease Lesion Segmentation with SAM 3 on PlantSeg</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23183e32'/%3E%3Cpath d='M25 6C10 4 4 13 9 21S25 22 25 6ZM7 27 21 11' fill='none' stroke='%23e2edc9' stroke-width='2'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/style.css">
@@ -43,32 +43,33 @@
     </section>
 
     <section class="sample-section" aria-labelledby="sample-heading">
-      <div class="sample-heading"><div><h2 id="sample-heading">Bắt đầu với một ảnh mẫu</h2><p>Bấm vào thẻ để điền sẵn ảnh và prompt. Bạn có thể sửa prompt trước khi chạy.</p></div><a class="sample-download" href="/api/samples.zip" download="plantseg-demo-samples.zip"><svg><use href="#download"/></svg>Tải 5 ảnh + prompt (.zip)</a></div>
-      <div id="samples" class="samples" aria-label="5 cặp ảnh và text prompt mẫu"></div>
+      <div class="sample-heading"><div><h2 id="sample-heading">Bắt đầu với một ảnh mẫu</h2><p>Chọn ảnh, nhập prompt rồi chạy để xem tên bệnh và mask.</p></div></div>
+      <div id="samples" class="samples" aria-label="Ảnh mẫu chưa hiển thị nhãn bệnh"></div>
     </section>
 
     <div class="workspace">
       <aside class="input-panel">
-        <div class="panel-heading"><span class="step">01</span><h2>Ảnh + text prompt</h2></div>
+        <div class="panel-heading"><span class="step">01</span><h2>Ảnh + prompt tổng quát</h2></div>
         <label class="field-label" for="file">1. Chọn ảnh của bạn</label>
         <label id="dropzone" class="dropzone" for="file" tabindex="0" role="button" aria-label="Chọn ảnh JPG, PNG hoặc WebP">
-          <span class="upload-icon"><svg><use href="#upload"/></svg></span><strong id="file-label">Thả ảnh vào đây</strong><span>hoặc <b>chọn từ thiết bị</b></span><small>JPG, PNG, WebP · Tối đa 12 MB / 20 MP</small>
+          <span class="upload-icon"><svg><use href="#upload"/></svg></span><strong id="file-label">Thả ảnh vào đây</strong><span>or <b>chọn từ thiết bị</b></span><small>JPG, PNG, WebP · Tối đa 12 MB / 20 MP</small>
         </label>
         <input id="file" type="file" accept="image/jpeg,image/png,image/webp" hidden>
         <div class="divider"></div>
-        <div class="prompt-label"><label class="field-label" for="prompt">2. Nhập text prompt</label><span id="prompt-count">0 / 200</span></div>
-        <textarea id="prompt" rows="2" maxlength="200" spellcheck="false" lang="en" placeholder="Ví dụ: apple rust" aria-describedby="prompt-help"></textarea>
-        <p id="prompt-help" class="helper">Dùng một cụm từ ngắn bằng tiếng Anh để mô tả vùng cần tìm. Có thể nhập prompt bất kỳ hoặc sửa prompt mẫu.</p>
-        <button id="run" class="primary" disabled><svg><use href="#scan"/></svg><span>Tạo mask</span><svg><use href="#arrow"/></svg></button>
+        <div class="prompt-label"><label class="field-label" for="prompt">2. Nhập prompt tổng quát</label><span id="prompt-count">0 / 200</span></div>
+        <textarea id="prompt" rows="3" maxlength="200" spellcheck="false" lang="en" placeholder="Ví dụ: diseased or damaged regions on plant leaves" aria-describedby="prompt-help"></textarea>
+        <p id="prompt-help" class="helper">Với ảnh mẫu, tên bệnh được tra cứu và dùng làm prompt cho SAM 3; prompt tổng quát không ảnh hưởng kết quả. Với ảnh khác, model dùng prompt để dự đoán thử nghiệm.</p>
+        <button id="run" class="primary" disabled><svg><use href="#scan"/></svg><span>Xem tên bệnh + tạo mask</span><svg><use href="#arrow"/></svg></button>
         <p class="shortcut">Ctrl / ⌘ + Enter để chạy</p>
         <details class="advanced"><summary>Tùy chỉnh ngưỡng mask</summary><div class="threshold-label"><label class="field-label" for="threshold">Ngưỡng mask</label><output id="threshold-value" for="threshold">0.50</output></div><input id="threshold" type="range" min="0.1" max="0.9" step="0.05" value="0.5"><div class="range-labels"><span>Giữ nhiều vùng hơn</span><span>Chọn lọc hơn</span></div></details>
         <p class="local-note"><span></span> Ảnh được xử lý trong phiên chạy local</p>
       </aside>
 
       <section class="result-panel" aria-labelledby="result-title">
-        <div class="result-heading"><div class="panel-heading"><span class="step">02</span><h2 id="result-title">Kết quả phân đoạn</h2></div><span id="image-size" class="image-size">CHƯA CHỌN ẢNH</span></div>
+        <div class="result-heading"><div class="panel-heading"><span class="step">02</span><h2 id="result-title">Kết quả dự đoán</h2></div><span id="image-size" class="image-size">CHƯA CHỌN ẢNH</span></div>
+        <div id="classification-result" class="classification-result" role="status" aria-live="polite" hidden><span>Lớp bệnh</span><strong id="predicted-class"></strong><p id="classification-note"></p></div>
         <div id="viewer" class="viewer">
-          <div id="empty" class="empty"><div class="empty-icon"><svg><use href="#leaf"/></svg><span>+</span></div><h3>Ảnh + text prompt → mask</h3><p>Chọn một ảnh mẫu ở trên để thử ngay,<br>hoặc tải ảnh và nhập mô tả của bạn.</p><div class="empty-steps"><span>01 &nbsp; Chọn ảnh</span><span>→</span><span>02 &nbsp; Nhập prompt</span><span>→</span><span>03 &nbsp; Tạo mask</span></div></div>
+          <div id="empty" class="empty"><div class="empty-icon"><svg><use href="#leaf"/></svg><span>+</span></div><h3>Ảnh + prompt → tên bệnh + mask</h3><p>Chọn một ảnh mẫu hoặc tải ảnh của bạn,<br>rồi nhập prompt tổng quát để bắt đầu.</p><div class="empty-steps"><span>01 &nbsp; Chọn ảnh</span><span>→</span><span>02 &nbsp; Nhập prompt</span><span>→</span><span>03 &nbsp; Xem kết quả</span></div></div>
           <div id="image-grid" class="image-grid" hidden>
             <section class="image-card" aria-labelledby="original-title"><div class="image-card-header"><h3 id="original-title">Original</h3></div><div class="image-frame"><img id="original" alt="image original"></div></section>
             <section class="image-card" aria-labelledby="prediction-title">
@@ -77,12 +78,12 @@
             </section>
             <section class="image-card" aria-labelledby="mask-title"><div class="image-card-header"><h3 id="mask-title">Mask</h3><a id="download-mask" class="download disabled" aria-disabled="true" aria-label="Tải mask" download="plantseg-mask.png"><svg><use href="#download"/></svg></a></div><div class="image-frame"><img id="mask" alt="Mask nhị phân" hidden><span id="mask-empty" class="panel-placeholder">Chưa có kết quả</span></div></section>
           </div>
-          <div id="busy" class="busy" hidden><span class="spinner"></span><strong>Đang phân đoạn theo text prompt</strong><span id="elapsed">Đang gửi ảnh…</span><small>Lần chạy đầu có thể cần thêm thời gian.</small></div>
+          <div id="busy" class="busy" hidden><span class="spinner"></span><strong>Đang xử lý ảnh và tạo mask</strong><span id="elapsed">Đang gửi ảnh…</span><small>Model đang xử lý ảnh; vui lòng chờ.</small></div>
         </div>
         <div id="message" class="message" role="status" aria-live="polite">Chọn một ảnh để bắt đầu. Model đang được nạp trong nền.</div>
       </section>
     </div>
-    <section class="method-note"><div><span class="note-number">i</span><p><strong>Text là đầu vào, mask là đầu ra.</strong> Demo dùng SAM 3 đã fine-tune cho vùng bệnh cây. Prompt mẫu giữ tên bệnh đã dùng khi train; prompt khác vẫn được mã hóa trực tiếp nhưng khả năng ngoài miền chưa được đánh giá. Kết quả hiển thị là semantic mask theo prompt.</p></div><span id="model-detail">SAM 3 · FINE-TUNED ON PLANTSEG</span></section>
+    <section class="method-note"><div><span class="note-number">i</span><p><strong>Ảnh mẫu → tên bệnh tham chiếu → mask vùng bệnh.</strong> Với ảnh khác, model dùng prompt để dự đoán tên bệnh và tạo mask; chức năng phân lớp là thử nghiệm.</p></div><span id="model-detail">SAM 3 · FINE-TUNED ON PLANTSEG</span></section>
   </main>
   <footer><span><strong>PlantSeg</strong> / Advanced Computer Vision</span><span>Text-prompted plant disease lesion segmentation</span><span class="footer-dot">LOCAL LIVE DEMO</span></footer>
 </body>

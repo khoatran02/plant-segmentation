@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 let model = null, selected = null, result = null, running = false;
 let selectionVersion = 0, readVersion = 0;
-let uploadingCheckpoint = false, statusTimer;
+let uploadingCheckpoint = false, readingImage = false, statusTimer;
 const fmt = new Intl.NumberFormat('vi-VN');
 const PREDICTION_COLOR = [37, 99, 235];
 const PREDICTION_OPACITY = 0.65;
@@ -43,7 +43,9 @@ function message(text, error = false) {
   $('message').classList.toggle('error', error);
 }
 function updateRun() {
-  $('run').disabled = running || uploadingCheckpoint || !selected || model?.status !== 'ready' || !$('prompt').value.trim();
+  $('run').disabled = running || uploadingCheckpoint || readingImage || !selected || model?.status !== 'ready'
+    || !model.classification_available || model.prediction_pipeline !== 'reference_lookup_segmentation_v1'
+    || !$('prompt').value.trim();
   $('prompt-count').textContent = `${$('prompt').value.length} / 200`;
 }
 function clearResult() {
@@ -61,6 +63,15 @@ function renderView() {
   $('mask').hidden = !result;
   $('prediction-empty').hidden = Boolean(result);
   $('mask-empty').hidden = Boolean(result);
+  const classification = result?.classification;
+  $('classification-result').hidden = !classification;
+  $('predicted-class').textContent = classification?.predicted_class?.name || 'Chưa xác định được lớp bệnh';
+  $('classification-note').textContent = classification && !classification.predicted_class ? ({
+      no_prompt_region: 'Model chưa tìm được vùng phù hợp với prompt. Hãy thử mô tả vùng bệnh ngắn hơn.',
+      no_matching_region: 'Chưa tìm được lớp bệnh có vùng phân đoạn phù hợp với prompt.',
+      below_presence_threshold: 'Các lớp có vùng phù hợp đều chưa vượt ngưỡng presence của model.',
+    }[classification.reason] || 'Chưa có đủ bằng chứng để xác định lớp bệnh trong vùng được yêu cầu.') : '';
+  $('classification-note').hidden = !$('classification-note').textContent;
   const link = $('download-overlay');
   if (result) link.href = result.overlay; else link.removeAttribute('href');
   link.classList.toggle('disabled', !result);
@@ -69,10 +80,11 @@ function renderView() {
 function invalidate() {
   selectionVersion++;
   clearResult();
-  if (selected) message('Bấm “Tạo mask” để phân đoạn ảnh theo prompt hiện tại.');
+  if (selected) message('Nhập prompt tổng quát rồi bấm “Xem tên bệnh + tạo mask”.');
   updateRun();
 }
 function setImage(source, selection, name) {
+  readingImage = false;
   selected = selection;
   $('original').onload = () => {
     $('image-size').textContent = `${fmt.format($('original').naturalWidth)} × ${fmt.format($('original').naturalHeight)} PX`;
@@ -81,23 +93,33 @@ function setImage(source, selection, name) {
   $('file-label').textContent = name;
   document.querySelectorAll('.sample').forEach(b => b.classList.toggle('selected', Number(b.dataset.id) === selection.sample_id));
   invalidate();
-  message($('prompt').value.trim() ? 'Ảnh và prompt đã sẵn sàng. Bấm “Tạo mask” để chạy.' : 'Ảnh đã sẵn sàng. Nhập text prompt để mô tả vùng muốn tìm.');
+  message($('prompt').value.trim() ? 'Ảnh và prompt đã sẵn sàng. Bấm “Xem tên bệnh + tạo mask” để chạy.' : 'Ảnh đã sẵn sàng. Nhập prompt rồi chạy để xem tên bệnh và tạo mask.');
 }
 async function useFile(file) {
   const version = ++readVersion;
+  readingImage = false;
+  updateRun();
   if (!file) return;
   if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) return message('Hãy chọn ảnh JPG, PNG hoặc WebP.', true);
   if (file.size > 12 * 1024 * 1024) return message('Ảnh vượt quá 12 MB. Vui lòng chọn ảnh nhỏ hơn.', true);
+  readingImage = true;
+  invalidate();
+  message('Đang đọc ảnh…');
   try {
     const source = await new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file);
     });
+    if (version !== readVersion) return;
     const image = new Image(); image.src = source; await image.decode();
     if (version !== readVersion) return;
     if (image.naturalWidth * image.naturalHeight > 20000000) return message('Ảnh vượt quá 20 megapixel.', true);
     setImage(source, { image: source.split(',')[1] }, file.name);
-  } catch { message('Không đọc được ảnh. Vui lòng chọn một ảnh khác.', true); }
+  } catch {
+    if (version === readVersion) message('Không đọc được ảnh. Vui lòng chọn một ảnh khác.', true);
+  } finally {
+    if (version === readVersion) { readingImage = false; updateRun(); }
+  }
 }
 function renderModelStatus(next) {
   const previousStatus = model?.status;
@@ -123,9 +145,14 @@ function renderModelStatus(next) {
       $('threshold-value').value = Number(model.mask_threshold).toFixed(2);
     }
     if (previousStatus !== 'ready') {
-      message(selected ? 'Model sẵn sàng. Bấm “Tạo mask” để chạy.' : 'Model sẵn sàng. Chọn ảnh mẫu hoặc tải ảnh của bạn lên.');
+      message(selected ? 'Model sẵn sàng. Bấm nút chạy để xem tên bệnh và tạo mask.' : 'Model sẵn sàng. Chọn ảnh mẫu hoặc tải ảnh của bạn lên.');
       $('checkpoint-feedback').hidden = true;
       $('checkpoint-progress').hidden = true;
+    }
+    if (model.prediction_pipeline !== 'reference_lookup_segmentation_v1') {
+      message('Server đang dùng phiên bản demo cũ. Hãy khởi động lại demo.py và tải lại trang.', true);
+    } else if (!model.classification_available) {
+      message('Chưa nạp được danh sách lớp bệnh từ Metadata.csv. Kiểm tra cấu hình dataset và log terminal.', true);
     }
   } else if (previousStatus !== model.status) {
     message(model.message, needsCheckpoint);
@@ -140,6 +167,7 @@ async function pollStatus() {
     const next = await response.json();
     if (!uploadingCheckpoint) renderModelStatus(next);
   } catch {
+    if (uploadingCheckpoint) return;
     $('status').className = 'status error';
     $('status').lastElementChild.textContent = 'Mất kết nối';
     model = null; updateRun(); message('Chưa kết nối được server. Kiểm tra terminal đang chạy demo.py.', true);
@@ -205,19 +233,19 @@ async function loadSamples() {
   try {
     const response = await fetch('/api/samples');
     if (!response.ok) throw new Error();
-    for (const sample of await response.json()) {
+    for (const sample of (await response.json()).slice(0, 5)) {
+      // Also hide labels when a new frontend is served by an older demo process.
+      const sampleTitle = `Ảnh mẫu ${String(sample.id + 1).padStart(2, '0')}`;
       const button = document.createElement('button');
       button.className = 'sample'; button.dataset.id = sample.id;
-      button.title = sample.title; button.setAttribute('aria-label', `Dùng ảnh và prompt ${sample.prompt}`);
-      const image = document.createElement('img'); image.src = sample.url; image.alt = sample.title; image.loading = 'lazy';
-      const title = document.createElement('strong'); title.textContent = sample.prompt;
-      const caption = document.createElement('span'); caption.textContent = sample.title;
+      button.title = sampleTitle; button.setAttribute('aria-label', `Dùng ${sampleTitle.toLowerCase()}`);
+      const image = document.createElement('img'); image.src = sample.url; image.alt = sampleTitle; image.loading = 'lazy';
+      const title = document.createElement('strong'); title.textContent = sampleTitle;
+      const caption = document.createElement('span'); caption.textContent = 'Bấm để chọn ảnh';
       button.append(image, title, caption);
       button.onclick = () => {
         readVersion++;
-        $('prompt').value = sample.prompt;
-        setImage(sample.url, { sample_id: sample.id }, sample.name);
-        $('prompt').focus({ preventScroll: true });
+        setImage(sample.url, { sample_id: sample.id }, sampleTitle);
         document.querySelector('.workspace').scrollIntoView({
           behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
           block: 'start',
@@ -229,6 +257,7 @@ async function loadSamples() {
 }
 async function run() {
   if ($('run').disabled) return;
+  clearResult();
   running = true; updateRun(); $('busy').hidden = false;
   if (window.matchMedia('(max-width: 760px)').matches) {
     $('result-title').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -237,12 +266,12 @@ async function run() {
   const started = performance.now();
   const timer = setInterval(() => $('elapsed').textContent = `${Math.floor((performance.now() - started) / 1000)} giây · Model đang xử lý…`, 1000);
   const request = { ...selected, prompt: $('prompt').value.trim(), threshold: Number($('threshold').value) };
-  message('Đang chạy suy luận trên model đã fine-tune…');
+  message('Đang xử lý ảnh và tạo mask…');
   try {
     const response = await fetch('/api/predict', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request) });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Không thực hiện được phân đoạn.');
-    if (version !== selectionVersion) { message('Đầu vào đã thay đổi trong lúc xử lý. Bấm phân đoạn để chạy lại.'); return; }
+    if (version !== selectionVersion) return;
     // Render from the raw image and binary mask, independent of an older server's overlay color.
     data.overlay = await predictionOverlay(data.original, data.mask);
     if (version !== selectionVersion) return;

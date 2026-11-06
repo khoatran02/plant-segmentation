@@ -457,6 +457,29 @@ input[type=range] {
   justify-content:space-between;
   align-items:center
 }
+.classification-result {
+  margin-top:18px;
+  padding:14px 16px;
+  border:1px solid var(--line);
+  border-radius:8px;
+  background:#f8faf4;
+  overflow-wrap:anywhere;
+}
+.classification-result>span {
+  display:block;
+  font-size:10px;
+  color:var(--muted);
+}
+.classification-result strong {
+  display:block;
+  margin-top:4px;
+  font-size:18px;
+}
+.classification-result p {
+  font-size:10px;
+  margin:6px 0 0;
+  color:var(--muted);
+}
 .image-size {
   font-family:Manrope,var(--sans);
   font-size:8px;
