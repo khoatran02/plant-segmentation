@@ -1,0 +1,19 @@
+# Python 3.12/3.13; keep all compiled PyTorch extensions on matching releases.
+torch==2.8.0
+torchvision==0.23.0
+# Transformers imports audio utilities even for SAM3; replace Kaggle's mismatched build.
+torchaudio==2.8.0
+# Tested against this exact SAM3 API and save_pretrained/safetensors implementation.
+transformers==5.22.1
+huggingface_hub>=1.0,<2
+safetensors>=0.4.3
+# NumPy 1.26 supports Python <=3.12 and conflicts with Kaggle's NumPy 2 stack.
+numpy>=2.1,<3
+Pillow>=10,<13
+tqdm>=4.66
+matplotlib>=3.9,<4
+pycocotools>=2.0.8
+scipy>=1.13,<1.17
+# Test and lint tools share this requirements file with the training dependencies.
+pytest>=8
+ruff>=0.9
